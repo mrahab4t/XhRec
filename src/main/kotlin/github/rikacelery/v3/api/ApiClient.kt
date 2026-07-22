@@ -79,6 +79,22 @@ object ApiClient {
         return response.status.value in 200..299
     }
 
+    suspend fun roomRequestSpyShow(roomId: Long, user: User): Boolean {
+        val initial = userFetchInitial(user)
+        val client = ClientManager.getProxiedClient("api")
+        val response = withRetry(3, stopIf = { false }) {
+            client.post("https://xhamsterlive.com/api/front/show/models/$roomId/viewers/${user.userId}/spy") { // TODO: unsure
+                header("Cookie", user.cookie)
+                contentType(ContentType.Application.Json)
+                setBody(buildJsonObject {
+                    put("csrfToken", initial.PathSingle("initial.client.csrfToken").asString())
+                    put("csrfTimestamp", initial.PathSingle("initial.client.csrfTimestamp").asString())
+                })
+            }
+        }
+        return response.status.value in 200..299
+    }
+
     suspend fun roomQualities(roomName: String): List<String> {
         val info = roomFetchBroadcastInfo(roomName)
         val presetElem = info.PathSingleOrNull("item.settings.presets") ?: run {

@@ -241,16 +241,16 @@ class SessionComponent(
         when (event) {
             is RoomStatusChanged -> {
                 val rs = sessions[event.roomId] ?: return
-                if (event.newStatus == "public" || event.newStatus == "groupShow") {
+                if (event.newStatus == "public" || event.newStatus == "groupShow" || event.newStatus == "private") {
                     if (rs.state == SessionState.Armed) {
-                        if (event.newStatus == "groupShow") {
+                        if (event.newStatus == "groupShow" || event.newStatus == "private") {
                             // SchedulerComponent handles groupShow via DoStart→startSession→configureSession
                             return
                         }
                         startSession(event.roomId, rs.roomName, rs.quality, rs.pkey)
                     }
 
-                } else if (event.newStatus == "offline" || event.newStatus == "private") {
+                } else if (event.newStatus == "offline") {
                     if (rs.state == SessionState.Recording) {
                         rs.state = SessionState.Closing
                         rs.pollingJob?.cancel()
@@ -386,6 +386,42 @@ class SessionComponent(
             val status = info.PathSingle("item.status").asString()
             when (status) {
                 "public" -> return ""
+                "private" -> {
+                    val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
+                    sessions[roomId]?.let { rs ->
+                        rs.timeLimit = config.timeLimit
+                        rs.sizeLimitBytes = config.sizeLimitBytes
+                    }
+                    if (!config.autoPay) {
+                        val reason = "autopay disabled"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] Room not enable autopay", roomName)
+                        return null
+                    }
+                    val camInfo = apiClient.roomFetchCamInfo(roomName, "")
+                    val price = camInfo.PathSingle("user.user.privateRate").asInt()
+                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(price.toLong()))
+                    val u = users.firstOrNull()
+                    if (u == null) {
+                        val reason = "insufficient balance"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] No account to pay. price={}", roomName, price)
+                        return null
+                    }
+                    var token = apiClient.roomFetchModelToken(roomName, u)
+                    if (token == null) {
+                        apiClient.roomRequestSpyShow(roomId, u)
+                        // requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
+                        delay(1.seconds)
+                        token = apiClient.roomFetchModelToken(roomName, u)
+                    }
+                    if (token == null) {
+                        logger.warn("[{}] Failed to get model token", roomName)
+                        return null
+                    }
+                    return token
+
+                }
                 "groupShow" -> {
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
                     sessions[roomId]?.let { rs ->
@@ -424,6 +460,32 @@ class SessionComponent(
 
                 else -> {
                     logger.trace("[{}] -> false, status={}", roomName, status)
+// +                   // --- DEBUG PATCH: dump raw API responses for unrecognized
+// +                   // statuses (e.g. "private") so they can be captured from
+// +                   // logs instead of browser DevTools. Only fires once per
+// +                   // distinct status per room to avoid spamming the log on
+// +                   // every poll cycle.
+// +                   val debugKey = "debugstatus:$status"
+// +                   if (status != null && lastBlockReason.put(roomId, debugKey) != debugKey) {
+// +                       logger.warn("[{}] DEBUG unrecognized status='{}' broadcastInfo={}", roomName, status, info)
+// +                       try {
+// +                           val anonCamInfo = apiClient.roomFetchCamInfo(roomName, "")
+// +                           logger.warn("[{}] DEBUG camInfo (anonymous)={}", roomName, anonCamInfo)
+// +                       } catch (e: Exception) {
+// +                           logger.warn("[{}] DEBUG anonymous camInfo fetch failed: {}", roomName, e.message)
+// +                       }
+// +                       try {
+// +                           val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
+// +                           if (u != null) {
+// +                               val authCamInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
+// +                               logger.warn("[{}] DEBUG camInfo (authenticated, user={})={}", roomName, u.userId, authCamInfo)
+// +                           } else {
+// +                               logger.warn("[{}] DEBUG no user account loaded, skipping authenticated camInfo fetch", roomName)
+// +                           }
+// +                       } catch (e: Exception) {
+// +                           logger.warn("[{}] DEBUG authenticated camInfo fetch failed: {}", roomName, e.message)
+// +                       }
+// +                   }
                     return null
                 }
             }

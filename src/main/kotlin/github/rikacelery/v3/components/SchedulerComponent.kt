@@ -67,7 +67,7 @@ class SchedulerComponent(
             is RoomStatusChanged -> {
                 if (gracefulStop) return
                 val a = armed[event.roomId] ?: return
-                if (event.newStatus != "public" && event.newStatus != "groupShow") {
+                if (event.newStatus != "public" && event.newStatus != "groupShow" && event.newStatus != "private") {
                     return
                 }
                 if (event.newStatus == "groupShow" && !a.autoPay) return
