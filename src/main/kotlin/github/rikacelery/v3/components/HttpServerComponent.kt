@@ -5,7 +5,6 @@ import github.rikacelery.v3.core.RequestBus
 import github.rikacelery.v3.data.Room
 import github.rikacelery.v3.events.*
 import io.ktor.http.*
-import io.ktor.network.tls.certificates.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
 import io.ktor.server.engine.*
@@ -38,34 +37,13 @@ class HttpServerComponent(
     private val stopping = AtomicBoolean(false)
 
     fun start(): EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration> {
-        val keyStoreFile = File("xhrec.keystore")
-        if (!keyStoreFile.exists()) {
-            val ks = buildKeyStore {
-                certificate("xhrec") {
-                    password = "changeit"
-                    domains = listOf("127.0.0.1", "0.0.0.0", "localhost")
-                }
-            }
-            ks.saveToFile(keyStoreFile, "changeit")
-            logger.info("Generated self-signed certificate: {}", keyStoreFile.absolutePath)
-        }
-        val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
-            keyStoreFile.inputStream().use { load(it, "changeit".toCharArray()) }
-        }
-
         lateinit var engine: EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration>
         engine = embeddedServer(Netty, applicationEnvironment {
             log = LoggerFactory.getLogger("ktor.application")
         }, {
-            // engine config: SSL
-            sslConnector(
-                keyStore = keyStore,
-                keyAlias = "xhrec",
-                keyStorePassword = { "changeit".toCharArray() },
-                privateKeyPassword = { "changeit".toCharArray() }
-            ) {
+            // engine config: plain HTTP, no TLS
+            connector {
                 port = this@HttpServerComponent.port
-                keyStorePath = keyStoreFile
             }
         }) {
             install(CORS) { anyHost() }
