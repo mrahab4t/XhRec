@@ -460,32 +460,6 @@ class SessionComponent(
 
                 else -> {
                     logger.trace("[{}] -> false, status={}", roomName, status)
-// +                   // --- DEBUG PATCH: dump raw API responses for unrecognized
-// +                   // statuses (e.g. "private") so they can be captured from
-// +                   // logs instead of browser DevTools. Only fires once per
-// +                   // distinct status per room to avoid spamming the log on
-// +                   // every poll cycle.
-// +                   val debugKey = "debugstatus:$status"
-// +                   if (status != null && lastBlockReason.put(roomId, debugKey) != debugKey) {
-// +                       logger.warn("[{}] DEBUG unrecognized status='{}' broadcastInfo={}", roomName, status, info)
-// +                       try {
-// +                           val anonCamInfo = apiClient.roomFetchCamInfo(roomName, "")
-// +                           logger.warn("[{}] DEBUG camInfo (anonymous)={}", roomName, anonCamInfo)
-// +                       } catch (e: Exception) {
-// +                           logger.warn("[{}] DEBUG anonymous camInfo fetch failed: {}", roomName, e.message)
-// +                       }
-// +                       try {
-// +                           val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
-// +                           if (u != null) {
-// +                               val authCamInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
-// +                               logger.warn("[{}] DEBUG camInfo (authenticated, user={})={}", roomName, u.userId, authCamInfo)
-// +                           } else {
-// +                               logger.warn("[{}] DEBUG no user account loaded, skipping authenticated camInfo fetch", roomName)
-// +                           }
-// +                       } catch (e: Exception) {
-// +                           logger.warn("[{}] DEBUG authenticated camInfo fetch failed: {}", roomName, e.message)
-// +                       }
-// +                   }
                     return null
                 }
             }
