@@ -60,7 +60,8 @@ class AuthComponent(
                     OkResponse
                 } else ErrorResponse("user not found: ${env.command.userId}")
             }
-            else -> ErrorResponse("unknown auth query")
+            // else -> ErrorResponse("unknown auth query")
+            else -> return
         }
         eventBus.publish(CommandAck(env.id, ack))
     }
