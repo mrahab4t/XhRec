@@ -97,7 +97,7 @@ class HttpServerComponent(
                         call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
                     }
                 }
-                get("/graceful-stop") {
+                get("/stop-server") {
                     if (stopping.getAndSet(true)) {
                         call.respondText("Already shutting down...", status = HttpStatusCode.NotAcceptable)
                         return@get
@@ -335,7 +335,7 @@ class HttpServerComponent(
                         }
                     }
                 }
-                get("/stop-server") {
+                get("/graceful-stop") {
                     if (stopping.getAndSet(true)) {
                         call.respondText("Already shutting down...", status = HttpStatusCode.NotAcceptable)
                         return@get

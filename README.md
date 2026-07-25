@@ -142,8 +142,8 @@ All endpoints return JSON unless noted. Parameters are passed as query strings.
 
 | Endpoint         | Description                                      |
 |------------------|--------------------------------------------------|
-| `/graceful-stop` | Finish recordings and shut down                  |
-| `/stop-server`   | Finish recordings and post-processing, then exit |
+| `/graceful-stop` | Finish recordings and post-processing, then exit |
+| `/stop-server`   | Finish recordings and shut down                  |
 
 ### Status Response Format
 
