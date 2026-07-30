@@ -484,8 +484,12 @@ class SessionComponent(
         return null
     }
 
-    private fun buildMasterUrl(roomId: Long): String =
-        "https://edge-hls.doppiocdn.org/hls/$roomId/master/${roomId}_auto.m3u8"
+    private fun buildMasterUrl(rs: RoomSession): String = buildUrl {
+        protocol = URLProtocol.HTTPS
+        host = "edge-hls.doppiocdn.org"
+        encodedPath = "hls/${rs.roomId}/master/${rs.roomId}_auto.m3u8"
+        rs.token?.let { parameters["aclAuth"] = it }
+    }.toString()
 
     private fun buildFallbackPlaylistUrl(rs: RoomSession, useRaw: Boolean = false): String {
         val token = rs.token
@@ -507,7 +511,7 @@ class SessionComponent(
 
     private suspend fun fetchAndCacheMasterPlaylist(rs: RoomSession): MasterPlaylist {
         val client = ClientManager.getProxiedClient("master_${rs.roomId}")
-        val url = buildMasterUrl(rs.roomId)
+        val url = buildMasterUrl(rs)
         val response = withRetry(3) { client.get(url) }
         val text = response.bodyAsText()
         val master = m3u8Parser.parseMaster(text)
