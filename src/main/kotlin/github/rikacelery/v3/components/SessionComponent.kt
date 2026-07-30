@@ -408,9 +408,22 @@ class SessionComponent(
                             logger.warn("[{}] No account to pay. price={}", roomName, price)
                         return null
                     }
+                    // NOTE: unlike groupShow, entering a private show appears to be a
+                    // stateful action rather than a one-shot ticket purchase - the
+                    // server doesn't seem to populate modelToken on the cam-info
+                    // response until after this PUT is sent, even for accounts with
+                    // standing (fan-club) access. But it doesn't hurt to see if we
+                    // have a token.
                     var token = apiClient.roomFetchModelToken(roomName, u)
                     if (token == null) {
                         apiClient.roomRequestSpyShow(roomId, u)
+                        // DeductCoins intentionally NOT called here: unlike groupShow's
+                        // flat ticket price, private shows are believed to bill
+                        // per-minute server-side rather than as a single upfront charge,
+                        // and we have no confirmed request/response shape for that billing
+                        // yet. Only enable autopay on rooms you already have standing
+                        // (fan-club/paid) access to until that's verified - see the
+                        // accompanying notes on this endpoint.
                         // requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
                         delay(1.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
@@ -420,7 +433,6 @@ class SessionComponent(
                         return null
                     }
                     return token
-
                 }
                 "groupShow" -> {
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
