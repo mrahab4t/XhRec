@@ -28,8 +28,10 @@ sealed interface WriterMsg
 data class ActiveFile(
     val file: File,
     val eventFile: File,
-    val fos: FileOutputStream,
-    val eventFos: FileOutputStream,
+    // val fos: FileOutputStream,
+    // val eventFos: FileOutputStream,
+    val fos: BufferedOutputStream,
+    val eventFos: BufferedOutputStream,
     val roomId: Long,
     val roomName: String,
     val startTime: Instant,
