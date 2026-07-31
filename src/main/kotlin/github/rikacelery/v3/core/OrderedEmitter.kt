@@ -2,25 +2,30 @@ package github.rikacelery.v3.core
 
 import github.rikacelery.v3.data.*
 import github.rikacelery.v3.events.EndReason
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class OrderedEmitter(
     private val roomId: Long,
     private val output: suspend (DataChannelMsg) -> Unit
 ) {
+    private val mutex = Mutex()
     private var nextIndex = 0L
     private val buffer = sortedMapOf<Long, DownloadResult>()
 
     suspend fun complete(idx: Long, result: DownloadResult) {
-        buffer[idx] = result
-        drain()
+        mutex.withLock {
+            buffer[idx] = result
+            drain()
+        }
     }
 
     private suspend fun drain() {
+
         while (buffer.isNotEmpty() && buffer.firstKey() == nextIndex) {
             val result = buffer.remove(nextIndex)!!
             emitIfSuccess(nextIndex, result)
             nextIndex++
-
         }
     }
 
