@@ -17,6 +17,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -103,7 +106,13 @@ class DownloaderComponent(
         val active = rooms[cut.roomId] ?: return
         val idx = active.idx.incrementAndGet().toLong()
         logger.info("CutPoint roomId={}, index={}, reason={}", cut.roomId, cut.index, cut.reason)
-        active.emitter.complete(idx,  DownloadResult.CutPoint(cut))
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                active.emitter.complete(idx, DownloadResult.CutPoint(cut))
+            } catch (e: Exception) {
+                logger.error("Failed to complete cut point for roomId={}", cut.roomId, e)
+            }
+        }
     }
 
     private val raceThresholdMs: Long = 15_000

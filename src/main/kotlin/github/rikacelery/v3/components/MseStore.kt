@@ -38,7 +38,8 @@ class MseStore : DataHook {
         var lastAccess: Long = System.currentTimeMillis(),
         val segCounter: AtomicInteger = AtomicInteger(0),
         var latestIdx: Int = -1,
-        val sseChannels: MutableList<SendChannel<SseChunk>> = Collections.synchronizedList(mutableListOf())
+        // val sseChannels: MutableList<SendChannel<SseChunk>> = Collections.synchronizedList(mutableListOf())
+        val sseChannels: MutableSet<SendChannel<SseChunk>> = ConcurrentHashMap.newKeySet()
     )
 
     private val rooms = ConcurrentHashMap<Long, RoomState>()
@@ -85,9 +86,19 @@ class MseStore : DataHook {
     }
 
     private fun broadcast(state: RoomState, chunk: SseChunk) {
-        for (ch in state.sseChannels.toList()) { // snapshot, no lock held during trySend
-            ch.trySend(chunk)
+        val iterator = state.sseChannels.iterator()
+        while (iterator.hasNext()) {
+            val ch = iterator.next()
+            val result = ch.trySend(chunk)
+
+            if (result.isClosed) {
+                iterator.remove()
+            }
         }
+
+        // for (ch in state.sseChannels.toList()) { // snapshot, no lock held during trySend
+        //     ch.trySend(chunk)
+        // }
     }
 
     private fun onStreamEnd(roomId: Long) {
