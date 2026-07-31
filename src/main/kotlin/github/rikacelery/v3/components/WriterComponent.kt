@@ -84,22 +84,33 @@ class WriterComponent(
         val existing = files.remove(msg.roomId)
         if (existing != null) {
             logger.info("Duplicate StreamStart for room ${msg.roomId}, closing existing file")
-            closeActiveFile(existing, EndReason.NewInit)
+            parentScope.launch(Dispatchers.IO + NonCancellable) {
+                closeActiveFile(existing, EndReason.NewInit)
+            }
         }
 
         val timestamp = timeFormatter.format(msg.startTime)
         var path = "${tmpDir.absolutePath}/${msg.roomName}-$timestamp-init.mp4"
-        try {
-            hooks.forEach { path = it.beforeFileOpen(msg.roomId, path) }
 
-            val file = File(path)
-            file.parentFile?.mkdirs()
-            val eventFile = File("$path.event")
+        try {
             withContext(Dispatchers.IO) {
+                hooks.forEach { path = it.beforeFileOpen(msg.roomId, path) }
+
+                val file = File(path)
+                file.parentFile?.mkdirs()
+                val eventFile = File("$path.event")
+
+                val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
+                val bufferedEventFos = BufferedOutputStream(FileOutputStream(eventFile), 8 * 1024)
+
                 files[msg.roomId] = ActiveFile(
                     file = file, eventFile = eventFile,
-                    fos = FileOutputStream(file), eventFos = FileOutputStream(eventFile),
-                    roomId = msg.roomId, roomName = msg.roomName, startTime = msg.startTime, quality = msg.quality
+                    fos = bufferedFos,
+                    eventFos = bufferedEventFos,
+                    roomId = msg.roomId,
+                    roomName = msg.roomName,
+                    startTime = msg.startTime,
+                    quality = msg.quality
                 )
             }
             logger.info("Opened file: $path")
@@ -113,13 +124,13 @@ class WriterComponent(
     private suspend fun handleStreamData(msg: StreamData) {
         val active = files[msg.roomId] ?: return
         try {
-            var data = msg.data
-            hooks.forEach { data = it.beforeWrite(msg.roomId, data) }
-            logger.trace("Receive {} {}", msg.roomId, msg.meta.url)
             withContext(Dispatchers.IO) {
+                var data = msg.data
+                logger.trace("Receive {} {}", msg.roomId, msg.meta.url)
+                hooks.forEach { data = it.beforeWrite(msg.roomId, data) }
                 active.fos.write(data)
+                active.bytesWritten += data.size
             }
-            active.bytesWritten += data.size
         } catch (e: Exception) {
             logger.error("Failed to write data for room ${msg.roomId}: ${e.message}", e)
             eventBus.publish(WriterFatal(msg.roomId, e.message ?: "Unknown error"))
@@ -129,7 +140,9 @@ class WriterComponent(
 
     private suspend fun handleStreamEnd(msg: StreamEnd) {
         val active = files.remove(msg.roomId) ?: return
-        closeActiveFile(active, msg.reason)
+        parentScope.launch(Dispatchers.IO + NonCancellable) {
+            closeActiveFile(active, msg.reason)
+        }
     }
 
     private suspend fun handleStreamEvent(msg: StreamEvent) {
@@ -148,9 +161,15 @@ class WriterComponent(
     private suspend fun closeActiveFile(active: ActiveFile, reason: EndReason) {
         withContext(NonCancellable) {
             try {
+                // Ensure all buffered bytes in memory are written before closing
+                runCatching { active.fos.flush() }
+                runCatching { active.eventFos.flush() }
+
                 if (active.bytesWritten < 1024) {
                     logger.info("Closed file: ${active.file.absolutePath}, reason=$reason (empty)")
                     active.dispose()
+                    active.file.delete()
+                    active.eventFile.delete()
                     return@withContext
                 }
                 active.fos.close()
@@ -161,12 +180,19 @@ class WriterComponent(
                 val durFmt = formatDurationHM(durationMs)
                 val finalName = "${active.roomName}-${timeFormatter.format(active.startTime)}-${durFmt}.mp4"
                 val finalFile = File(tmpDir, finalName)
-                active.file.renameTo(finalFile)
-
                 val finalEvent = File(tmpDir, "$finalName.event")
-                active.eventFile.renameTo(finalEvent)
 
-                if (finalEvent.length() == 0L) {
+                // Robust atomic file move across filesystems / mounts
+                runCatching {
+                    Files.move(active.file.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    Files.move(active.eventFile.toPath(), finalEvent.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                }.onFailure { e ->
+                    logger.warn("Files.move failed, falling back to renameTo: ${e.message}")
+                    active.file.renameTo(finalFile)
+                    active.eventFile.renameTo(finalEvent)
+                }
+
+                if (finalEvent.exists() && finalEvent.length() == 0L) {
                     finalEvent.delete()
                 }
                 if (finalFile.length() == 0L) {
@@ -176,7 +202,18 @@ class WriterComponent(
                 }
 
                 hooks.forEach { it.afterFileClosed(active.roomId, finalFile) }
-                eventBus.publish(FileReady(active.roomId, finalFile, reason, active.roomName, active.startTime.toEpochMilli(), endTime.toEpochMilli(), durationMs, active.quality))
+                eventBus.publish(
+                    FileReady(
+                        active.roomId,
+                        finalFile,
+                        reason,
+                        active.roomName,
+                        active.startTime.toEpochMilli(),
+                        endTime.toEpochMilli(),
+                        durationMs,
+                        active.quality
+                    )
+                )
                 logger.info("Closed file: ${finalFile.absolutePath}, reason=$reason")
             } catch (e: Exception) {
                 logger.error("Failed to close file for room ${active.roomId}: ${e.message}", e)
