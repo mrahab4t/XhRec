@@ -13,8 +13,11 @@ import github.rikacelery.v3.events.WriterFatal
 import github.rikacelery.v3.hooks.WriterHook
 import kotlinx.coroutines.*
 import org.slf4j.LoggerFactory
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -58,7 +61,7 @@ class WriterComponent(
     private val tmpDir: File,
     private val hooks: List<WriterHook> = emptyList(),
     eventBus: EventBus,
-    parentScope: CoroutineScope
+    private val parentScope: CoroutineScope
 ) : Actor<WriterMsg>("WriterComponent", eventBus, parentScope) {
 
     private val files = ConcurrentHashMap<Long, ActiveFile>()

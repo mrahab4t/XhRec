@@ -91,7 +91,7 @@ class MseStore : DataHook {
             val ch = iterator.next()
             val result = ch.trySend(chunk)
 
-            if (result.isClosedForSend) {
+            if (result.isClosed) {
                 iterator.remove()
             }
         }
