@@ -83,7 +83,7 @@ object ApiClient {
         val initial = userFetchInitial(user)
         val client = ClientManager.getProxiedClient("api")
         val response = withRetry(3, stopIf = { false }) {
-            client.put("https://xhamsterlive.com/api/front/show/models/$roomId/viewers/${user.userId}/spy") { // TODO: unsure
+            client.put("https://xhamsterlive.com/api/front/show/models/$roomId/viewers/${user.userId}/spy?source=proposePrivate") { // TODO: unsure
                 header("Cookie", user.cookie)
                 contentType(ContentType.Application.Json)
                 setBody(buildJsonObject {

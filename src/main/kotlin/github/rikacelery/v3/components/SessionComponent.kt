@@ -408,11 +408,24 @@ class SessionComponent(
                             logger.warn("[{}] No account to pay. price={}", roomName, price)
                         return null
                     }
+                    // NOTE: unlike groupShow, entering a private show appears to be a
+                    // stateful action rather than a one-shot ticket purchase - the
+                    // server doesn't seem to populate modelToken on the cam-info
+                    // response until after this PUT is sent, even for accounts with
+                    // standing (fan-club) access. But it doesn't hurt to see if we
+                    // have a token.
                     var token = apiClient.roomFetchModelToken(roomName, u)
                     if (token == null) {
                         apiClient.roomRequestSpyShow(roomId, u)
+                        // DeductCoins intentionally NOT called here: unlike groupShow's
+                        // flat ticket price, private shows are believed to bill
+                        // per-minute server-side rather than as a single upfront charge,
+                        // and we have no confirmed request/response shape for that billing
+                        // yet. Only enable autopay on rooms you already have standing
+                        // (fan-club/paid) access to until that's verified - see the
+                        // accompanying notes on this endpoint.
                         // requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
-                        delay(1.seconds)
+                        delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
                     }
                     if (token == null) {
@@ -420,7 +433,6 @@ class SessionComponent(
                         return null
                     }
                     return token
-
                 }
                 "groupShow" -> {
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
@@ -448,7 +460,7 @@ class SessionComponent(
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
-                        delay(1.seconds)
+                        delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
                     }
                     if (token == null) {
@@ -472,8 +484,12 @@ class SessionComponent(
         return null
     }
 
-    private fun buildMasterUrl(roomId: Long): String =
-        "https://edge-hls.doppiocdn.org/hls/$roomId/master/${roomId}_auto.m3u8"
+    private fun buildMasterUrl(rs: RoomSession): String = buildUrl {
+        protocol = URLProtocol.HTTPS
+        host = "edge-hls.doppiocdn.org"
+        encodedPath = "hls/${rs.roomId}/master/${rs.roomId}_auto.m3u8"
+        rs.token?.let { parameters["aclAuth"] = it }
+    }.toString()
 
     private fun buildFallbackPlaylistUrl(rs: RoomSession, useRaw: Boolean = false): String {
         val token = rs.token
@@ -495,7 +511,7 @@ class SessionComponent(
 
     private suspend fun fetchAndCacheMasterPlaylist(rs: RoomSession): MasterPlaylist {
         val client = ClientManager.getProxiedClient("master_${rs.roomId}")
-        val url = buildMasterUrl(rs.roomId)
+        val url = buildMasterUrl(rs)
         val response = withRetry(3) { client.get(url) }
         val text = response.bodyAsText()
         val master = m3u8Parser.parseMaster(text)
