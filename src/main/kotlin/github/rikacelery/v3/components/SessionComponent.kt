@@ -425,7 +425,7 @@ class SessionComponent(
                         // (fan-club/paid) access to until that's verified - see the
                         // accompanying notes on this endpoint.
                         // requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
-                        delay(1.seconds)
+                        delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
                     }
                     if (token == null) {
@@ -460,7 +460,7 @@ class SessionComponent(
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
-                        delay(1.seconds)
+                        delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
                     }
                     if (token == null) {
