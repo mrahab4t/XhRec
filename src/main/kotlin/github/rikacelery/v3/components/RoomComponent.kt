@@ -176,18 +176,15 @@ class RoomComponent(
 
             is GetRooms -> rooms.values.map { it.copy() }
             is RefreshRoomCmd -> {
-                scope.launch(Dispatchers.IO) {
+                scope.launch {
                     val room = rooms[cmd.roomId] ?: return@launch
                     try {
                         val info = apiClient.roomFetchBroadcastInfo(room.name)
-                        val newStatus = info.PathSingle("item.status").asString()
-                        if (newStatus != room.status) {
-                            val oldStatus = room.status
-                            val updatedRoom = room.copy (status = newStatus)
-                            rooms[room.id] = updatedRoom
-                            eventBus.publish(RoomStatusChanged(room.id, oldStatus, newStatus))
+                        val status = info.PathSingle("item.status").asString()
+                        if (status != room.status) {
+                            rooms[room.id] = room.copy(status = status)
                         }
-
+                        eventBus.publish(RoomStatusChanged(room.id, room.status, status))
                     } catch (e: Exception) {
                         logger.error("Failed to refresh status for room ${cmd.roomId}", e)
                     }
