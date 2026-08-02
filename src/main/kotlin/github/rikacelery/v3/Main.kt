@@ -12,6 +12,7 @@ import github.rikacelery.v3.events.*
 import github.rikacelery.v3.hooks.EventHook
 import github.rikacelery.v3.m3u8.M3u8Parser
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -69,7 +70,7 @@ fun main(vararg args: String) {
         return
     }
 
-    runBlocking {
+    runBlocking(Dispatchers.Default) {
         val appScope = this
 
         val configPath = "xhrec.json"
