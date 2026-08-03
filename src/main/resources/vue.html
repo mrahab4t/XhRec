@@ -537,6 +537,7 @@
                     editLimits: {}, // Cache for limits inputs to prevent overlap with polling
                     editSizeLimits: {}, // Cache for size limits inputs to prevent overlap with polling
                     allUrls: [],
+                    allUrlsSeen: new Set(),
                     snapshotcache: {},
                     activeVideos: {},
                     previewHeight: 80,
@@ -798,7 +799,22 @@
                         }
 
                         this.roomInfo = newRoomInfo;
-                        this.allUrls = newAllUrls;
+                        const MAX_NETWORK_LOG_LINES = 500;
+                        for (const entry of newAllUrls) {
+                            if (this.allUrlsSeen.has(entry.url)) {
+                                // Still in-flight (or re-seen): refresh its live timing in place
+                                // rather than treating it as a new line.
+                                const idx = this.allUrls.findIndex(e => e.url === entry.url);
+                                if (idx !== -1) this.allUrls[idx] = entry;
+                            } else {
+                                this.allUrlsSeen.add(entry.url);
+                                this.allUrls.push(entry);
+                                if (this.allUrls.length > MAX_NETWORK_LOG_LINES) {
+                                    const removed = this.allUrls.shift();
+                                    this.allUrlsSeen.delete(removed.url);
+                                }
+                            }
+                        }
                     } catch (e) {
                         // Suppress polling error logs to keep console clean
                     }
