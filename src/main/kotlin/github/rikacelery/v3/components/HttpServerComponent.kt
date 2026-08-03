@@ -282,6 +282,7 @@ class HttpServerComponent(
                                         })
                                         put("active", s?.state == SessionState.Recording)
                                         put("quality", s?.quality ?: "")
+                                        put("startTime", if (isActive) s?.startTime?.toEpochMilli() ?: 0L else 0L)
                                     })
                                     put("listening", s != null || isArmed)
                                     put("room", buildJsonObject {
