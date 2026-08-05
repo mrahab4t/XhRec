@@ -392,7 +392,7 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    if (!config.autoPay) {
+                    if (!config.autoPayPrivate) {
                         val reason = "autopay disabled"
                         if (lastBlockReason.put(roomId, reason) != reason)
                             logger.warn("[{}] Room not enable autopay", roomName)
@@ -440,7 +440,7 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    if (!config.autoPay) {
+                    if (!config.autoPayTicket) {
                         val reason = "autopay disabled"
                         if (lastBlockReason.put(roomId, reason) != reason)
                             logger.warn("[{}] Room not enable autopay", roomName)

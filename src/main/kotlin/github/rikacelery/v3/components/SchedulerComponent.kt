@@ -19,7 +19,8 @@ data class ArmedRoom(
     val roomName: String,
     val quality: String,
     val pkey: String = "",
-    val autoPay: Boolean = false
+    val autoPayTicket: Boolean = false,
+    val autoPayPrivate: Boolean = false,
 )
 
 class SchedulerComponent(
@@ -70,7 +71,8 @@ class SchedulerComponent(
                 if (event.newStatus != "public" && event.newStatus != "groupShow" && event.newStatus != "private") {
                     return
                 }
-                if (event.newStatus == "groupShow" && !a.autoPay) return
+                if (event.newStatus == "groupShow" && !a.autoPayTicket) return
+                if (event.newStatus == "private" && !a.autoPayPrivate) return
                 logger.debug(
                     "Armed room {} ({}) became {}, starting recording",
                     event.roomId,
@@ -108,8 +110,8 @@ class SchedulerComponent(
         }
     }
 
-    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPay: Boolean) {
-        armed[room] = ArmedRoom(room, name1, quality, pkey, autoPay)
+    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPayTicket: Boolean, autoPayPrivate: Boolean) { // TODO
+        armed[room] = ArmedRoom(room, name1, quality, pkey, autoPayTicket, autoPayPrivate)
         if (isArmed) logger.info("Room {} ({}) armed and waiting", name1, room)
     }
 

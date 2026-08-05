@@ -146,7 +146,9 @@ class Bootstrap(
 
     data class ListConfLine(
         val url: String, val quality: String = "highest",
-        val timeLimit: Long = 0, val sizeLimit: Long = 0, val autoPay: Boolean = false, val pkey: String = "",
+        val timeLimit: Long = 0, val sizeLimit: Long = 0,
+        val autoPayTicket: Boolean = false, val autoPayPrivate: Boolean = false,
+        val pkey: String = "",
         val armed: Boolean
     )
 
@@ -186,9 +188,9 @@ class Bootstrap(
     private fun addRoomFromParsed(id: Long, name: String, parsed: ListConfLine) {
         SensitiveStringRegistry.mask(name)
         val timeLimit = if (parsed.timeLimit > 0) parsed.timeLimit.seconds else Duration.INFINITE
-        roomComponent.internalAdd(id, name, parsed.quality, timeLimit, parsed.sizeLimit, parsed.autoPay, parsed.pkey)
+        roomComponent.internalAdd(id, name, parsed.quality, timeLimit, parsed.sizeLimit, parsed.autoPayTicket, parsed.autoPayPrivate, parsed.pkey)
         if (parsed.armed) {
-            schedulerComponent.internalAdd(id, name, parsed.quality, parsed.pkey, parsed.armed,parsed.autoPay)
+            schedulerComponent.internalAdd(id, name, parsed.quality, parsed.pkey, parsed.armed, parsed.autoPayTicket, parsed.autoPayPrivate)
         }
     }
 
@@ -199,7 +201,8 @@ class Bootstrap(
         var quality = "highest"
         var timeLimit = 0L
         var sizeLimit = 0L
-        var autoPay = false
+        var autoPayTicket = false
+        var autoPayPrivate = false
         var pkey = ""
         for (i in 1 until parts.size) {
             when {
@@ -207,11 +210,19 @@ class Bootstrap(
                 parts[i].startsWith("limit:") -> timeLimit = parts[i].substring(6).toLong()
                 parts[i].startsWith("size:") -> sizeLimit = parseSize(parts[i].substring(5))
                 parts[i].startsWith("pkey:") -> pkey = parts[i].substring(5)
-                parts[i] == "autopay" -> autoPay = true
+                // Bare "autopay" is kept for backward compatibility with existing
+                // list.conf files and enables both. "autopay:ticket"/"autopay:private"
+                // enable just one; they can also be combined on the same line.
+                parts[i] == "autopay" -> {
+                    autoPayTicket = true
+                    autoPayPrivate = true
+                }
+                parts[i] == "autopay:ticket" -> autoPayTicket = true
+                parts[i] == "autopay:private" -> autoPayPrivate = true
             }
         }
         val trimmed = line.trim()
-        return ListConfLine(url, quality, timeLimit, sizeLimit, autoPay, pkey, armed = !trimmed.startsWith("#") && !trimmed.startsWith(";"))
+        return ListConfLine(url, quality, timeLimit, sizeLimit, autoPayTicket, autoPayPrivate, pkey, armed = !trimmed.startsWith("#") && !trimmed.startsWith(";"))
     }
 
     private fun parseSize(s: String): Long {

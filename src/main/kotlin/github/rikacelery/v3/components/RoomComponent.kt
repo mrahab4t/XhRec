@@ -114,7 +114,8 @@ class RoomComponent(
                     r.quality,
                     r.timeLimit,
                     r.sizeLimitBytes,
-                    r.autoPay,
+                    r.autoPayTicket,
+                    r.autoPayPrivate,
                     r.pkey
                 )
             }
@@ -139,7 +140,13 @@ class RoomComponent(
             }
 
             is SetRoomAutoPay -> {
-                rooms[cmd.roomId]?.let { rooms[it.id] = it.copy(autoPay = cmd.autoPay) }; OkResponse
+                rooms[cmd.roomId]?.let {
+                    rooms[it.id] = when (cmd.kind) {
+                        AutoPayKind.GROUP_SHOW -> it.copy(autoPayTicket = cmd.autoPay)
+                        AutoPayKind.PRIVATE -> it.copy(autoPayPrivate = cmd.autoPay)
+                    }
+                }
+                OkResponse
             }
 
             is AddRoom -> {
@@ -151,7 +158,7 @@ class RoomComponent(
                         logger.warn("Duplicate room: id={}, name={}", id, name)
                         ErrorResponse("Exist $name")
                     } else {
-                        rooms[id] = Room(id, name, cmd.quality, cmd.timeLimit, cmd.sizeLimitBytes, cmd.autoPay, null, pkey = cmd.pkey)
+                        rooms[id] = Room(id, name, cmd.quality, cmd.timeLimit, cmd.sizeLimitBytes, cmd.autoPayTicket, cmd.autoPayPrivate, null, pkey = cmd.pkey)
                         SensitiveStringRegistry.mask(name)
                         logger.info("Room added: id={}, name={}, quality={}", id, name, cmd.quality)
                         eventBus.publish(RoomAdded(id, name))
@@ -236,10 +243,11 @@ class RoomComponent(
         quality: String,
         timeLimit: Duration,
         sizeLimitBytes: Long,
-        autoPay: Boolean,
+        autoPayTicket: Boolean,
+        autoPayPrivate: Boolean,
         pkey: String = ""
     ) {
-        rooms[id] = Room(id, name, quality, timeLimit, sizeLimitBytes, autoPay, null, pkey = pkey)
+        rooms[id] = Room(id, name, quality, timeLimit, sizeLimitBytes, autoPayTicket, autoPayPrivate, null, pkey = pkey)
     }
 
 
@@ -254,7 +262,11 @@ class RoomComponent(
                     if (room.timeLimit != Duration.INFINITE) sb.append(" limit:${room.timeLimit.inWholeSeconds}")
                     if (room.sizeLimitBytes > 0) sb.append(" size:${formatSize(room.sizeLimitBytes)}")
                     if (room.pkey.isNotBlank()) sb.append(" pkey:${room.pkey}")
-                    if (room.autoPay) sb.append(" autopay")
+                    when {
+                        room.autoPayTicket && room.autoPayPrivate -> sb.append(" autopay")
+                        room.autoPayTicket -> sb.append(" autopay:ticket")
+                        room.autoPayPrivate -> sb.append(" autopay:private")
+                    }
                     sb.toString()
                 }.let { lines -> if (lines.isNotEmpty()) lines + "\n" else "" })
             }
