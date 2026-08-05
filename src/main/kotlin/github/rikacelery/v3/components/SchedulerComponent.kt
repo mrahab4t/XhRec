@@ -124,7 +124,7 @@ class SchedulerComponent(
                     val name = requestBus.request<RoomNameResponse>(GetRoomName(env.command.roomId)).name
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(env.command.roomId))
                     armed[env.command.roomId] =
-                        ArmedRoom(env.command.roomId, name, config.quality, config.pkey, config.autoPay)
+                        ArmedRoom(env.command.roomId, name, config.quality, config.pkey, config.autoPayTicket, config.autoPayPrivate)
                     logger.info("Room {} ({}) activated (armed)", name, env.command.roomId)
                     requestBus.request<OkResponse>(RefreshRoomCmd(env.command.roomId))
                 }
