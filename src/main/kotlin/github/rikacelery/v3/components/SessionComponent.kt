@@ -392,7 +392,7 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    if (!config.autoPayPrivate) {
+                    if (!config.autoPaySpy) {
                         val reason = "autopay disabled"
                         if (lastBlockReason.put(roomId, reason) != reason)
                             logger.warn("[{}] Room not enable autopay", roomName)

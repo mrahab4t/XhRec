@@ -24,7 +24,7 @@ data class AddRoom(
     val timeLimit: Duration = Duration.INFINITE,
     val sizeLimitBytes: Long = 0,
     val autoPayTicket: Boolean = false,
-    val autoPayPrivate: Boolean = false,
+    val autoPaySpy: Boolean = false,
 ) : Request
 data class RemoveRoom(val roomId: Long) : Request
 
@@ -77,7 +77,7 @@ data class RoomConfigResponse(
     val timeLimit: Duration,
     val sizeLimitBytes: Long,
     val autoPayTicket: Boolean,
-    val autoPayPrivate: Boolean,
+    val autoPaySpy: Boolean,
     val pkey: String = ""
 ) : Response
 data class ConfigResponse(val value: Any?) : Response

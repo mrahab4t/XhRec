@@ -18,7 +18,7 @@ data class Room(
     val timeLimit: Duration = Duration.INFINITE,
     val sizeLimitBytes: Long,
     val autoPayTicket: Boolean = false,
-    val autoPayPrivate: Boolean = false,
+    val autoPaySpy: Boolean = false,
     val lastSeen: String?,
     val status: String = "",
     val pkey: String = ""
