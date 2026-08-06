@@ -60,7 +60,7 @@ class HttpServerComponent(
                     val active = call.request.queryParameters["active"]?.toBooleanStrictOrNull() ?: false
                     val limit = call.request.queryParameters["limit"]?.toLongOrNull() ?: 0L
                     val autopayTicket = call.request.queryParameters["autopayTicket"]?.toBooleanStrictOrNull() ?: false
-                    val autopayPrivate = call.request.queryParameters["autopayPrivate"]?.toBooleanStrictOrNull() ?: false
+                    val autoPaySpy = call.request.queryParameters["autoPaySpy"]?.toBooleanStrictOrNull() ?: false
                     val pkey = call.request.queryParameters["pkey"] ?: ""
                     val sizeBytes = call.request.queryParameters["size"]?.let {
                         try {
@@ -82,7 +82,7 @@ class HttpServerComponent(
                                 if (limit > 0) limit.seconds else Duration.INFINITE,
                                 sizeBytes,
                                 autopayTicket,
-                                autopayPrivate
+                                autoPaySpy
                             ), timeoutMs = 30_000
                         )
                         if (active) {
@@ -300,7 +300,7 @@ class HttpServerComponent(
                                         put("status", r.status)
                                         put("timeLimit", if (r.timeLimit == Duration.INFINITE) 0L else r.timeLimit.inWholeMilliseconds)
                                         put("sizeLimitBytes", r.sizeLimitBytes)
-                                        put("autoPayTicket", r.autoPayTicket); put("autoPayPrivate", r.autoPayPrivate)
+                                        put("autoPayTicket", r.autoPayTicket); put("autoPaySpy", r.autoPaySpy)
                                     })
                                 })
                             }

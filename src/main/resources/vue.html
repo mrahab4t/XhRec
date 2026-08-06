@@ -450,7 +450,7 @@
                                     <div class="flex flex-col items-center gap-0.5">
                                         <label class="relative inline-flex items-center cursor-pointer"
                                             :title="$t('Auto-pay for private shows')">
-                                            <input type="checkbox" v-model="room.autoPayPrivate"
+                                            <input type="checkbox" v-model="room.autoPaySpy"
                                                 @change="setAutoPay($event.target.checked, room.id, 'private')" class="sr-only peer">
                                             <div
                                                 class="w-7 h-4 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-indigo-600">
@@ -632,8 +632,8 @@
                             if (!isNaN(res) && res !== 0) return this.sort["Quality"] === 1 ? res : -res;
                         }
                         if (this.sort["AutoPay"]) {
-                            const aCount = (a.autoPayTicket ? 1 : 0) + (a.autoPayPrivate ? 1 : 0);
-                            const bCount = (b.autoPayTicket ? 1 : 0) + (b.autoPayPrivate ? 1 : 0);
+                            const aCount = (a.autoPayTicket ? 1 : 0) + (a.autoPaySpy ? 1 : 0);
+                            const bCount = (b.autoPayTicket ? 1 : 0) + (b.autoPaySpy ? 1 : 0);
                             if (aCount !== bCount) return this.sort["AutoPay"] === 1 ? bCount - aCount : aCount - bCount;
                             if (a.autoPayTicket !== b.autoPayTicket) {
                                 return this.sort["AutoPay"] === 1 ? (a.autoPayTicket ? -1 : 1) : (a.autoPayTicket ? 1 : -1);

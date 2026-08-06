@@ -20,7 +20,7 @@ data class ArmedRoom(
     val quality: String,
     val pkey: String = "",
     val autoPayTicket: Boolean = false,
-    val autoPayPrivate: Boolean = false,
+    val autoPaySpy: Boolean = false,
 )
 
 class SchedulerComponent(
@@ -72,7 +72,7 @@ class SchedulerComponent(
                     return
                 }
                 if (event.newStatus == "groupShow" && !a.autoPayTicket) return
-                if (event.newStatus == "private" && !a.autoPayPrivate) return
+                if (event.newStatus == "private" && !a.autoPaySpy) return
                 logger.debug(
                     "Armed room {} ({}) became {}, starting recording",
                     event.roomId,
@@ -110,8 +110,8 @@ class SchedulerComponent(
         }
     }
 
-    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPayTicket: Boolean, autoPayPrivate: Boolean) { // TODO
-        armed[room] = ArmedRoom(room, name1, quality, pkey, autoPayTicket, autoPayPrivate)
+    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPayTicket: Boolean, autoPaySpy: Boolean) { // TODO
+        armed[room] = ArmedRoom(room, name1, quality, pkey, autoPayTicket, autoPaySpy)
         if (isArmed) logger.info("Room {} ({}) armed and waiting", name1, room)
     }
 
@@ -124,7 +124,7 @@ class SchedulerComponent(
                     val name = requestBus.request<RoomNameResponse>(GetRoomName(env.command.roomId)).name
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(env.command.roomId))
                     armed[env.command.roomId] =
-                        ArmedRoom(env.command.roomId, name, config.quality, config.pkey, config.autoPayTicket, config.autoPayPrivate)
+                        ArmedRoom(env.command.roomId, name, config.quality, config.pkey, config.autoPayTicket, config.autoPaySpy)
                     logger.info("Room {} ({}) activated (armed)", name, env.command.roomId)
                     requestBus.request<OkResponse>(RefreshRoomCmd(env.command.roomId))
                 }

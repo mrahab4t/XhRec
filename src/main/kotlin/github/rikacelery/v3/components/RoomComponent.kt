@@ -115,7 +115,7 @@ class RoomComponent(
                     r.timeLimit,
                     r.sizeLimitBytes,
                     r.autoPayTicket,
-                    r.autoPayPrivate,
+                    r.autoPaySpy,
                     r.pkey
                 )
             }
@@ -143,7 +143,7 @@ class RoomComponent(
                 rooms[cmd.roomId]?.let {
                     rooms[it.id] = when (cmd.kind) {
                         AutoPayKind.GROUP_SHOW -> it.copy(autoPayTicket = cmd.autoPay)
-                        AutoPayKind.PRIVATE -> it.copy(autoPayPrivate = cmd.autoPay)
+                        AutoPayKind.PRIVATE -> it.copy(autoPaySpy = cmd.autoPay)
                     }
                 }
                 OkResponse
@@ -158,7 +158,7 @@ class RoomComponent(
                         logger.warn("Duplicate room: id={}, name={}", id, name)
                         ErrorResponse("Exist $name")
                     } else {
-                        rooms[id] = Room(id, name, cmd.quality, cmd.timeLimit, cmd.sizeLimitBytes, cmd.autoPayTicket, cmd.autoPayPrivate, null, pkey = cmd.pkey)
+                        rooms[id] = Room(id, name, cmd.quality, cmd.timeLimit, cmd.sizeLimitBytes, cmd.autoPayTicket, cmd.autoPaySpy, null, pkey = cmd.pkey)
                         SensitiveStringRegistry.mask(name)
                         logger.info("Room added: id={}, name={}, quality={}", id, name, cmd.quality)
                         eventBus.publish(RoomAdded(id, name))
@@ -244,10 +244,10 @@ class RoomComponent(
         timeLimit: Duration,
         sizeLimitBytes: Long,
         autoPayTicket: Boolean,
-        autoPayPrivate: Boolean,
+        autoPaySpy: Boolean,
         pkey: String = ""
     ) {
-        rooms[id] = Room(id, name, quality, timeLimit, sizeLimitBytes, autoPayTicket, autoPayPrivate, null, pkey = pkey)
+        rooms[id] = Room(id, name, quality, timeLimit, sizeLimitBytes, autoPayTicket, autoPaySpy, null, pkey = pkey)
     }
 
 
@@ -263,9 +263,9 @@ class RoomComponent(
                     if (room.sizeLimitBytes > 0) sb.append(" size:${formatSize(room.sizeLimitBytes)}")
                     if (room.pkey.isNotBlank()) sb.append(" pkey:${room.pkey}")
                     when {
-                        room.autoPayTicket && room.autoPayPrivate -> sb.append(" autopay")
+                        room.autoPayTicket && room.autoPaySpy -> sb.append(" autopay")
                         room.autoPayTicket -> sb.append(" autopay:ticket")
-                        room.autoPayPrivate -> sb.append(" autopay:private")
+                        room.autoPaySpy -> sb.append(" autopay:private")
                     }
                     sb.toString()
                 }.let { lines -> if (lines.isNotEmpty()) lines + "\n" else "" })
