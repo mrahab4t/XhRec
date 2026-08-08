@@ -398,14 +398,21 @@ class SessionComponent(
                             logger.warn("[{}] Room not enable autopay", roomName)
                         return null
                     }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, "")
-                    val price = camInfo.PathSingle("user.user.privateRate").asInt()
-                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(price.toLong()))
-                    val u = users.firstOrNull()
+                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
+                    // Hard gate: only proceed with an account that has genuine
+                    // fan-club free-spy access to THIS model, per hasFreeSpyAccess.
+                    // Private shows are believed to bill per-minute server-side
+                    // (unlike groupShow's flat ticket price), and there's no
+                    // confirmed request/response shape for that billing yet, so we
+                    // don't attempt to pay for access we don't already have.
+                    //
+                    // To record regardless of free-access status instead, replace
+                    // the line below with: val u = users.firstOrNull()
+                    val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
                     if (u == null) {
-                        val reason = "insufficient balance"
+                        val reason = "no free spy access"
                         if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] No account to pay. price={}", roomName, price)
+                            logger.warn("[{}] No account has free spy access for this room", roomName)
                         return null
                     }
                     // NOTE: unlike groupShow, entering a private show appears to be a
@@ -417,14 +424,6 @@ class SessionComponent(
                     var token = apiClient.roomFetchModelToken(roomName, u)
                     if (token == null) {
                         apiClient.roomRequestSpyShow(roomId, u)
-                        // DeductCoins intentionally NOT called here: unlike groupShow's
-                        // flat ticket price, private shows are believed to bill
-                        // per-minute server-side rather than as a single upfront charge,
-                        // and we have no confirmed request/response shape for that billing
-                        // yet. Only enable autopay on rooms you already have standing
-                        // (fan-club/paid) access to until that's verified - see the
-                        // accompanying notes on this endpoint.
-                        // requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
                         delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomName, u)
                     }
