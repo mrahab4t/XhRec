@@ -81,11 +81,11 @@ fun main(vararg args: String) {
         return
     }
 
-    runBlocking {
+    runBlocking(Dispatchers.Default) {
         // Components run on a shared Default pool: each actor still processes its
         // mailbox serially, but different components can work in parallel. Blocking
         // IO is dispatched explicitly with withContext(Dispatchers.IO) at each site.
-        val appScope = CoroutineScope(Dispatchers.Default + SupervisorJob() + CoroutineName("xhrec-app"))
+        val appScope = this
 
         val configPath = "xhrec.json"
         val persisted = loadPersistedConfig(configPath)
