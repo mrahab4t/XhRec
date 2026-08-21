@@ -3,11 +3,16 @@ package github.rikacelery.v3.components
 import github.rikacelery.v3.core.Actor
 import github.rikacelery.v3.core.EventBus
 import github.rikacelery.v3.core.RequestBus
+import github.rikacelery.v3.data.RoomStatus
 import github.rikacelery.v3.events.*
+import github.rikacelery.v3.utils.ClientManager
+import github.rikacelery.v3.utils.StreamProbe
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 
 sealed interface SchedulerMsg
@@ -20,21 +25,30 @@ data class ArmedRoom(
     val quality: String,
     val pkey: String = "",
     val autoPayTicket: Boolean = false,
-    val autoPaySpy: Boolean = false,
+    val autoPaySpy: Boolean = false
 )
 
 class SchedulerComponent(
     private val requestBus: RequestBus,
     private val sessionComponent: SessionComponent,
     eventBus: EventBus,
-    parentScope: CoroutineScope
+    parentScope: CoroutineScope,
+    private val streamAuthKey: String = ""
 ) : Actor<SchedulerMsg>("SchedulerComponent", eventBus, parentScope) {
 
     private val armed = ConcurrentHashMap<Long, ArmedRoom>()
     private var gracefulStop = false
 
+    // latest known room status (public/groupShow/off/idle...) and stream lifecycle status
+    private val roomStatuses = ConcurrentHashMap<Long, String>()
+    private val streamStatuses = ConcurrentHashMap<Long, String>()
+    // fallback start jobs scheduled when a room goes public but the stream event is late/missed
+    private val pendingStarts = ConcurrentHashMap<Long, Job>()
+    private val streamReadyTimeoutMs = 15_000L
+
     override suspend fun onStart(scope: CoroutineScope) {
         subscribe<RoomStatusChanged>(RoomStatusChanged::class)
+        subscribe<StreamStatusChanged>(StreamStatusChanged::class)
         subscribe<RecordingStopped>(RecordingStopped::class)
         subscribe<DownloadError>(DownloadError::class)
         subscribe<WriterFatal>(WriterFatal::class)
@@ -45,6 +59,7 @@ class SchedulerComponent(
 
     override suspend fun wrapEvent(event: Any): SchedulerMsg? = when (event) {
         is RoomStatusChanged -> OnSchedulerEvent(event)
+        is StreamStatusChanged -> OnSchedulerEvent(event)
         is RecordingStopped -> OnSchedulerEvent(event)
         is DownloadError -> OnSchedulerEvent(event)
         is WriterFatal -> OnSchedulerEvent(event)
@@ -68,18 +83,39 @@ class SchedulerComponent(
             is RoomStatusChanged -> {
                 if (gracefulStop) return
                 val a = armed[event.roomId] ?: return
-                if (event.newStatus != "public" && event.newStatus != "groupShow" && event.newStatus != "private") {
-                    return
+                roomStatuses[event.roomId] = event.newStatus
+                val recordable = RoomStatus.isPublic(event.newStatus) ||
+                    (RoomStatus.isGroupShow(event.newStatus) && a.autoPayTicket) ||
+                    (RoomStatus.isPrivate(event.newStatus) && a.autoPaySpy)
+                if (recordable) {
+                    logger.debug("Armed room {} ({}) became {}, waiting for stream", event.roomId, a.roomName, event.newStatus)
+                    val streamStatus = streamStatuses[event.roomId]
+                    when {
+                        // stream already distributing → start immediately
+                        streamStatus == "distributing" -> tryStartRecording(event.roomId, a)
+                        // private shows: the anonymous probe can never succeed (master needs the
+                        // show token) and configureSession itself acquires the token, so start
+                        // directly and let configureSession gate readiness
+                        RoomStatus.isPrivate(event.newStatus) -> tryStartRecording(event.roomId, a)
+                        // stream status unknown (e.g. first boot: already streaming, no event will come)
+                        // → probe the master playlist; start at once when it is reachable
+                        streamStatus == null -> probeAndStart(event.roomId, a)
+                        // known but not distributing yet (probing) → wait for the distributing event
+                        else -> scheduleStart(event.roomId, a)
+                    }
+                } else {
+                    cancelPendingStart(event.roomId)
                 }
-                if (event.newStatus == "groupShow" && !a.autoPayTicket) return
-                if (event.newStatus == "private" && !a.autoPaySpy) return
-                logger.debug(
-                    "Armed room {} ({}) became {}, starting recording",
-                    event.roomId,
-                    a.roomName,
-                    event.newStatus
-                )
-                sessionComponent.tell(DoStart(event.roomId, a.roomName, a.quality, a.pkey))
+            }
+
+            is StreamStatusChanged -> {
+                streamStatuses[event.roomId] = event.newStatus
+                if (gracefulStop) return
+                val a = armed[event.roomId] ?: return
+                if (event.newStatus == "distributing" && canRecord(event.roomId, a)) {
+                    cancelPendingStart(event.roomId)
+                    tryStartRecording(event.roomId, a)
+                }
             }
 
             is RecordingStopped -> {
@@ -110,7 +146,58 @@ class SchedulerComponent(
         }
     }
 
-    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPayTicket: Boolean, autoPaySpy: Boolean) { // TODO
+    /** True when the armed room is currently recordable (public / groupShow with ticket autopay / paid with private autopay). */
+    private fun canRecord(roomId: Long, a: ArmedRoom): Boolean {
+        val status = roomStatuses[roomId] ?: return false
+        return when {
+            RoomStatus.isPublic(status) -> true
+            RoomStatus.isGroupShow(status) -> a.autoPayTicket
+            RoomStatus.isPrivate(status) -> a.autoPaySpy
+            else -> false
+        }
+    }
+
+    /** Start recording now (guard: graceful stop / room recordable). */
+    private suspend fun tryStartRecording(roomId: Long, a: ArmedRoom) {
+        if (gracefulStop) return
+        if (!canRecord(roomId, a)) return
+        logger.debug("Starting recording for {} ({})", a.roomName, roomId)
+        sessionComponent.tell(DoStart(roomId, a.roomName, a.quality, a.pkey))
+    }
+
+    /** Probe stream readiness (first boot / unknown status): start now if ready, else wait. */
+    private fun probeAndStart(roomId: Long, a: ArmedRoom) {
+        if (pendingStarts.containsKey(roomId)) return
+        val job = scope.launch {
+            // direct concurrent probe — no session-mailbox round trip, no request timeout
+            val ready = StreamProbe.masterReady(roomId, a.pkey.ifBlank { streamAuthKey })
+            pendingStarts.remove(roomId)
+            if (ready) {
+                tryStartRecording(roomId, a)
+            } else {
+                // not ready yet — wait for the distributing event or the timeout fallback
+                scheduleStart(roomId, a)
+            }
+        }
+        pendingStarts[roomId] = job
+    }
+
+    /** Arm a fallback start after [streamReadyTimeoutMs] in case the stream event is late or missed. */
+    private fun scheduleStart(roomId: Long, a: ArmedRoom) {
+        if (pendingStarts.containsKey(roomId)) return
+        val job = scope.launch {
+            delay(streamReadyTimeoutMs.milliseconds)
+            pendingStarts.remove(roomId)
+            tryStartRecording(roomId, a)
+        }
+        pendingStarts[roomId] = job
+    }
+
+    private fun cancelPendingStart(roomId: Long) {
+        pendingStarts.remove(roomId)?.cancel()
+    }
+
+    fun internalAdd(room: Long, name1: String, quality: String, pkey: String, isArmed: Boolean, autoPayTicket: Boolean, autoPaySpy: Boolean) {
         armed[room] = ArmedRoom(room, name1, quality, pkey, autoPayTicket, autoPaySpy)
         if (isArmed) logger.info("Room {} ({}) armed and waiting", name1, room)
     }
@@ -133,8 +220,10 @@ class SchedulerComponent(
 
             is DeactivateCmd -> {
                 armed.remove(env.command.roomId)
+                cancelPendingStart(env.command.roomId)
                 logger.info("Room {} deactivated", env.command.roomId)
                 sessionComponent.tell(DoStop(env.command.roomId))
+                ClientManager.removeRoomClients(env.command.roomId)
                 OkResponse
             }
 
@@ -148,6 +237,7 @@ class SchedulerComponent(
                 gracefulStop = true
                 armed.forEach { (id, _) ->
                     sessionComponent.tell(DoBreak(id, EndReason.UserStop))
+                    ClientManager.removeRoomClients(id)
                 }
                 OkResponse
             }

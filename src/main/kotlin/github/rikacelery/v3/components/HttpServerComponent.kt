@@ -2,8 +2,10 @@ package github.rikacelery.v3.components
 
 import github.rikacelery.v3.core.EventBus
 import github.rikacelery.v3.core.RequestBus
+import github.rikacelery.v3.data.HostsConfig
 import github.rikacelery.v3.data.Room
 import github.rikacelery.v3.events.*
+import github.rikacelery.v3.utils.CdnSelector
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -11,8 +13,10 @@ import io.ktor.server.engine.*
 import io.ktor.server.netty.*
 import io.ktor.server.plugins.contentnegotiation.*
 import io.ktor.server.plugins.cors.routing.*
+import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import io.ktor.utils.io.ClosedWriteChannelException
 import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import org.slf4j.LoggerFactory
@@ -31,10 +35,14 @@ class HttpServerComponent(
     private val metricComponent: MetricComponent,
     private val postProcessorComponent: PostProcessorComponent,
     private val scope: CoroutineScope,
-    private val mseStore: MseStore = MseStore()
+    private val mseStore: MseStore = MseStore(),
+    private val apiToken: String = ""
 ) {
     private val logger = LoggerFactory.getLogger("v3.HttpServer")
     private val stopping = AtomicBoolean(false)
+    private val dashboardHtml: String by lazy {
+        this::class.java.getResource("/vue.html")!!.readText()
+    }
 
     fun start(): EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration> {
         lateinit var engine: EmbeddedServer<NettyApplicationEngine, NettyApplicationEngine.Configuration>
@@ -46,12 +54,28 @@ class HttpServerComponent(
                 port = this@HttpServerComponent.port
             }
         }) {
+            if (apiToken.isNotBlank()) {
+                intercept(ApplicationCallPipeline.Plugins) {
+                    val path = call.request.uri.substringBefore('?')
+                    if (path == "/") return@intercept
+
+                    val token = call.request.queryParameters["token"]
+                        ?: call.request.headers["Authorization"]
+                            ?.takeIf { it.startsWith("Bearer ", ignoreCase = true) }
+                            ?.substring(7)
+                            ?.trim()
+                    if (token != apiToken) {
+                        call.respond(HttpStatusCode.Unauthorized, "Unauthorized")
+                        return@intercept
+                    }
+                }
+            }
             install(CORS) { anyHost() }
             install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
 
             routing {
                 get("/") {
-                    call.respondText(this::class.java.getResource("/vue.html")!!.readText(), ContentType.Text.Html)
+                    call.respondText(dashboardHtml, ContentType.Text.Html)
                 }
                 get("/add") {
                     val name = call.request.queryParameters["name"] ?: ""
@@ -190,10 +214,7 @@ class HttpServerComponent(
                     val kind = when (call.request.queryParameters["kind"]) {
                         "private" -> AutoPayKind.PRIVATE
                         "ticket", null -> AutoPayKind.GROUP_SHOW
-                        else -> return@get call.respondText(
-                            "Invalid kind (expected 'ticket' or 'private')",
-                            status = HttpStatusCode.BadRequest
-                        )
+                        else -> return@get call.respondText("Invalid kind (expected 'ticket' or 'private')", status = HttpStatusCode.BadRequest)
                     }
                     requestBus.request<OkResponse>(SetRoomAutoPay(id, kind, v))
                     persistConfig()
@@ -299,8 +320,7 @@ class HttpServerComponent(
                                         put("name", r.name); put("id", r.id); put("quality", r.quality)
                                         put("status", r.status)
                                         put("timeLimit", if (r.timeLimit == Duration.INFINITE) 0L else r.timeLimit.inWholeMilliseconds)
-                                        put("sizeLimitBytes", r.sizeLimitBytes)
-                                        put("autoPayTicket", r.autoPayTicket); put("autoPaySpy", r.autoPaySpy)
+                                        put("sizeLimitBytes", r.sizeLimitBytes); put("autoPayTicket", r.autoPayTicket); put("autoPaySpy", r.autoPaySpy)
                                     })
                                 })
                             }
@@ -319,6 +339,44 @@ class HttpServerComponent(
                     val status = requestBus.request<ConfigResponse>(ToggleMask).value
                     persistConfig()
                     call.respondText(status.toString())
+                }
+                get("/config/hosts") {
+                    val hosts = requestBus.request<HostsConfigResponse>(GetHostsConfig).hosts
+                    val cdnStats = CdnSelector.snapshot()
+                    call.respond(buildJsonObject {
+                        hosts.toJson().forEach { (k, v) -> put(k, v) }
+                        put("cdnStats", buildJsonObject {
+                            cdnStats.forEach { (host, stat) ->
+                                put(host, buildJsonObject {
+                                    put("speedBps", stat.speedBps.toLong())
+                                    put("samples", stat.samples)
+                                    put("failures", stat.failures)
+                                    put("coolingDown", stat.cooldownUntil > System.currentTimeMillis())
+                                })
+                            }
+                        })
+                    })
+                }
+                post("/config/hosts") {
+                    val params = call.receiveParameters()
+                    fun listOf(key: String): List<String> =
+                        params[key]?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+                    val hosts = HostsConfig(
+                        platformHosts = listOf("platformHosts"),
+                        webSocketHosts = listOf("webSocketHosts"),
+                        hlsHosts = listOf("hlsHosts"),
+                        hlsMasterHost = params["hlsMasterHost"] ?: "",
+                        webHost = params["webHost"] ?: "",
+                        previewHost = params["previewHost"] ?: "",
+                        thumbHost = params["thumbHost"] ?: ""
+                    )
+                    try {
+                        requestBus.request<OkResponse>(SetHostsConfig(hosts))
+                        call.respondText("Hosts config updated")
+                    } catch (e: Exception) {
+                        logger.error("Failed to update hosts config", e)
+                        call.respondText("Error: ${e.message}", status = HttpStatusCode.InternalServerError)
+                    }
                 }
                 get("/mse/live") {
                     val id = call.request.queryParameters["id"]?.toLongOrNull()
@@ -339,7 +397,11 @@ class HttpServerComponent(
                                 }
                                 flush()
                             }
-                        }catch(e:Exception){
+                        } catch (e: ClosedWriteChannelException) {
+                            // client (browser) closed the preview — normal, not an error
+                            logger.debug("SSE client disconnected for room $id")
+                            return@respondOutputStream
+                        } catch (e: Exception) {
                             logger.error("SSE stream error for room $id: ${e.message}", e)
                             return@respondOutputStream
                         } finally {

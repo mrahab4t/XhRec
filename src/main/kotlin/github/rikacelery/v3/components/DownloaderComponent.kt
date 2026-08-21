@@ -8,8 +8,10 @@ import github.rikacelery.v3.data.DownloadMeta
 import github.rikacelery.v3.data.DownloadResult
 import github.rikacelery.v3.events.*
 import github.rikacelery.v3.hooks.DownloaderHook
+import github.rikacelery.v3.utils.CdnSelector
 import github.rikacelery.v3.utils.ClientManager
 import io.ktor.client.*
+import io.ktor.client.plugins.ResponseException
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.utils.io.*
@@ -34,10 +36,10 @@ data class DoCutPoint(val cut: CutPoint) : DownloaderMsg
 data class ActiveDownload(
     val emitter: OrderedEmitter,
     val semaphore: Semaphore,
-    val runningJobs: MutableSet<Job>,
+    val runningJobs: MutableSet<Job> = ConcurrentHashMap.newKeySet(),
     var idx: AtomicInteger = AtomicInteger(-1),
-    var generation: Int = 0,
-    var active: Boolean = true
+    @Volatile var generation: Int = 0,
+    @Volatile var active: Boolean = true
 )
 
 class DownloaderComponent(
@@ -66,8 +68,7 @@ class DownloaderComponent(
         val active = rooms.getOrPut(cmd.roomId) {
             ActiveDownload(
                 emitter = OrderedEmitter(cmd.roomId) { dataChannel.send(it) },
-                semaphore = Semaphore(initialConcurrency),
-                runningJobs = mutableSetOf()
+                semaphore = Semaphore(initialConcurrency)
             )
         }
         if (!active.active) return
@@ -79,21 +80,34 @@ class DownloaderComponent(
             hooks.forEach { url = it.beforeDownload(url) }
 
             val job = workerScope.launch {
-                active.semaphore.withPermit {
-                    eventBus.publish(DownloadStarted(cmd.roomId, idx, url, System.currentTimeMillis()))
-                    val result = downloadSegment(url, idx)
-                    val hooked = hooks.fold(result) { acc, hook -> hook.onDownloadResult(cmd.roomId, acc) }
-                    active.emitter.complete(idx.toLong(), hooked)
+                try {
+                    active.semaphore.withPermit {
+                        eventBus.publish(DownloadStarted(cmd.roomId, idx, url, System.currentTimeMillis()))
+                        val result = downloadSegment(url, idx)
+                        val hooked = hooks.fold(result) { acc, hook -> hook.onDownloadResult(cmd.roomId, acc) }
+                        active.emitter.complete(idx.toLong(), hooked)
 
-                    when (result) {
-                        is DownloadResult.Success -> {
-                            eventBus.publish(SegmentDownloaded(cmd.roomId, idx, seg.url,
-                                result.meta.fetchDurationMs, result.meta.proxied, result.data.size, active.generation))
+                        when (result) {
+                            is DownloadResult.Success -> {
+                                eventBus.publish(SegmentDownloaded(cmd.roomId, idx, seg.url,
+                                    result.meta.fetchDurationMs, result.meta.proxied, result.data.size, active.generation))
+                            }
+                            is DownloadResult.Failed -> {
+                                eventBus.publish(DownloadError(cmd.roomId, idx, seg.url, result.reason))
+                            }
+                            is DownloadResult.CutPoint -> {}
                         }
-                        is DownloadResult.Failed -> {
-                            eventBus.publish(DownloadError(cmd.roomId, idx, seg.url, result.reason))
-                        }
-                        is DownloadResult.CutPoint -> {}
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Still account for the segment so OrderedEmitter cannot stall forever.
+                    withContext(NonCancellable) {
+                        active.emitter.complete(idx.toLong(), DownloadResult.Failed(idx, seg.url, "cancelled", transportError = true))
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    logger.error("Download worker failed: idx=$idx, url=${seg.url}", e)
+                    withContext(NonCancellable) {
+                        active.emitter.complete(idx.toLong(), DownloadResult.Failed(idx, seg.url, e.message ?: "worker error", transportError = true))
                     }
                 }
             }
@@ -116,44 +130,68 @@ class DownloaderComponent(
     }
 
     private val raceThresholdMs: Long = 15_000
+    private val segmentTimeoutMs: Long = 60_000
 
     private suspend fun downloadSegment(url: String, idx: Int): DownloadResult {
         val start = System.currentTimeMillis()
+        // CDN host selection: rewrite to the fastest measured host (with epsilon exploration)
+        val resolvedUrl = CdnSelector.resolve(url)
+        val cdnHost = CdnSelector.hostOf(resolvedUrl)
 
         return try {
-            val directDeferred = scope.async {
-                downloadWithClient(ClientManager.getClient("dl_${Random.nextInt(32)}"), url, idx, false)
-            }
-
-            val directResult = withTimeoutOrNull(raceThresholdMs.milliseconds) { directDeferred.await() }
-            if (directResult is DownloadResult.Success) {
-                val dur = System.currentTimeMillis() - start
-                return directResult.copy(meta = directResult.meta.copy(fetchDurationMs = dur, proxied = false))
-            }
-
-            logger.debug("Direct download slow/failed for idx={}, falling back to proxy race", idx)
-            // Phase 2: proxy joins the race
-            val proxyDeferred = scope.async {
-                downloadWithClient(ClientManager.getProxiedClient("px_${Random.nextInt(5)}"), url, idx, true)
-            }
-
-            val result = select<DownloadResult> {
-                directDeferred.onAwait { r ->
-                    (r as? DownloadResult.Success)?.copy(meta = r.meta.copy(
-                        fetchDurationMs = System.currentTimeMillis() - start, proxied = false)) ?: r
+            withTimeoutOrNull(segmentTimeoutMs.milliseconds) {
+                val directDeferred = scope.async {
+                    downloadWithClient(ClientManager.getClient("dl_${Random.nextInt(32)}"), resolvedUrl, idx, false)
                 }
-                proxyDeferred.onAwait { r ->
-                    (r as? DownloadResult.Success)?.copy(meta = r.meta.copy(
-                        fetchDurationMs = System.currentTimeMillis() - start, proxied = true)) ?: r
-                }
-            }
 
-            if (!directDeferred.isCompleted) directDeferred.cancel()
-            if (!proxyDeferred.isCompleted) proxyDeferred.cancel()
-            result
+                val directResult = withTimeoutOrNull(raceThresholdMs.milliseconds) { directDeferred.await() }
+                if (directResult is DownloadResult.Success) {
+                    val dur = System.currentTimeMillis() - start
+                    CdnSelector.record(cdnHost, directResult.data.size.toLong(), dur)
+                    return@withTimeoutOrNull directResult.copy(meta = directResult.meta.copy(fetchDurationMs = dur, proxied = false))
+                }
+
+                logger.debug("Direct download slow/failed for idx={}, falling back to proxy race", idx)
+                val proxyDeferred = scope.async {
+                    downloadWithClient(ClientManager.getProxiedClient("px_${Random.nextInt(5)}"), resolvedUrl, idx, true)
+                }
+
+                val result = if (directDeferred.isCompleted) {
+                    // Direct already finished with a non-success result. Give the proxy a real
+                    // chance instead of letting select() immediately return the direct failure.
+                    withTimeoutOrNull(raceThresholdMs.milliseconds) { proxyDeferred.await() }
+                        ?: DownloadResult.Failed(idx, resolvedUrl, "proxy timeout", transportError = true)
+                } else {
+                    select<DownloadResult> {
+                        directDeferred.onAwait { r ->
+                            (r as? DownloadResult.Success)?.copy(meta = r.meta.copy(
+                                fetchDurationMs = System.currentTimeMillis() - start, proxied = false)) ?: r
+                        }
+                        proxyDeferred.onAwait { r ->
+                            (r as? DownloadResult.Success)?.copy(meta = r.meta.copy(
+                                fetchDurationMs = System.currentTimeMillis() - start, proxied = true)) ?: r
+                        }
+                    }
+                }
+
+                if (!directDeferred.isCompleted) directDeferred.cancel()
+                if (!proxyDeferred.isCompleted) proxyDeferred.cancel()
+
+                (result as? DownloadResult.Success)?.let {
+                    CdnSelector.record(cdnHost, it.data.size.toLong(), System.currentTimeMillis() - start)
+                }
+                // only connection-level failures implicate the CDN host; HTTP status errors don't
+                if (result is DownloadResult.Failed && result.transportError) CdnSelector.recordFailure(cdnHost)
+                result
+            } ?: DownloadResult.Failed(idx, resolvedUrl, "segment timeout after ${segmentTimeoutMs}ms", transportError = true).also {
+                CdnSelector.recordFailure(cdnHost)
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
+            CdnSelector.recordFailure(cdnHost)
             logger.error("downloadSegment failed: idx=$idx, url=$url", e)
-            DownloadResult.Failed(idx, url, e.message ?: "download failed")
+            DownloadResult.Failed(idx, url, e.message ?: "download failed", transportError = true)
         }
     }
 
@@ -171,9 +209,16 @@ class DownloaderComponent(
                 bos.write(buf, 0, read)
             }
             DownloadResult.Success(bos.toByteArray(), DownloadMeta(url, 0, proxied, Instant.now()))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // the download race was resolved and this coroutine was cancelled — not an error
+            throw e
+        } catch (e: ResponseException) {
+            // HTTP status errors (404 etc.) are routine — one line, no stack trace
+            logger.warn("downloadWithClient failed: idx=$idx, url=$url, proxied=$proxied, status=${e.response.status}")
+            DownloadResult.Failed(idx, url, "HTTP " + e.response.status, transportError = false)
         } catch (e: Exception) {
             logger.error("downloadWithClient failed: idx=$idx, url=$url, proxied=$proxied", e)
-            DownloadResult.Failed(idx, url, e.message ?: "download failed")
+            DownloadResult.Failed(idx, url, e.message ?: "download failed", transportError = true)
         }
     }
 }

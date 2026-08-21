@@ -5,10 +5,13 @@ import github.rikacelery.v3.core.Actor
 import github.rikacelery.v3.core.DataChannel
 import github.rikacelery.v3.core.EventBus
 import github.rikacelery.v3.core.RequestBus
+import github.rikacelery.v3.data.Hosts
+import github.rikacelery.v3.data.RoomStatus
 import github.rikacelery.v3.data.StreamEvent
 import github.rikacelery.v3.data.StreamStart
 import github.rikacelery.v3.data.User
 import github.rikacelery.v3.events.*
+import kotlinx.serialization.json.*
 import github.rikacelery.v3.m3u8.M3u8Parser
 import github.rikacelery.v3.m3u8.MasterPlaylist
 import github.rikacelery.v3.utils.*
@@ -25,6 +28,7 @@ import kotlin.math.abs
 import kotlin.random.Random
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.minutes
 import kotlin.time.Duration.Companion.seconds
 
 sealed interface SessionMsg
@@ -39,36 +43,37 @@ enum class SessionState { Idle, Armed, Fetching, Recording, Closing }
 
 data class RoomSession(
     val roomId: Long,
-    var roomName: String,
-    var quality: String,
-    var targetquality: String,
-    var state: SessionState = SessionState.Idle,
-    var playlistUrl: String = "",
-    var initUrl: String? = null,
-    var token: String? = null,
-    var pkey: String = "",
-    var segmentIndex: Int = 0,
-    var generation: Int = 0,
+    @Volatile var roomName: String,
+    @Volatile var quality: String,
+    @Volatile var targetquality: String,
+    val mutex: Mutex = Mutex(),
+    @Volatile var state: SessionState = SessionState.Idle,
+    @Volatile var playlistUrl: String = "",
+    @Volatile var initUrl: String? = null,
+    @Volatile var token: String? = null,
+    @Volatile var pkey: String = "",
+    @Volatile var segmentIndex: Int = 0,
+    @Volatile var generation: Int = 0,
     val circleCache: CircleCache = CircleCache(100),
-    var startTime: Instant = Instant.now(),
-    var totalBytes: Long = 0,
-    var timeLimit: Duration = Duration.INFINITE,
-    var sizeLimitBytes: Long = 0,
-    var pollingJob: Job? = null,
-    var masterPlaylist: MasterPlaylist? = null
+    @Volatile var startTime: Instant = Instant.now(),
+    @Volatile var totalBytes: Long = 0,
+    @Volatile var timeLimit: Duration = Duration.INFINITE,
+    @Volatile var sizeLimitBytes: Long = 0,
+    @Volatile var pollingJob: Job? = null,
+    @Volatile var masterPlaylist: MasterPlaylist? = null
 )
 
 class CircleCache(private val capacity: Int) {
     private val set = LinkedHashSet<String>()
-    fun add(url: String): Boolean {
+    @Synchronized fun add(url: String): Boolean {
         if (set.size >= capacity) {
             set.clear(); return true
         }
         return set.add(url)
     }
 
-    fun remove(url: String) = set.remove(url)
-    fun clear() = set.clear()
+    @Synchronized fun remove(url: String) = set.remove(url)
+    @Synchronized fun clear() = set.clear()
 }
 
 class SessionComponent(
@@ -85,6 +90,9 @@ class SessionComponent(
     private val sessions = ConcurrentHashMap<Long, RoomSession>()
     private val lastBlockReason = ConcurrentHashMap<Long, String>()
     private val decryptKeyCache = ConcurrentHashMap<String, String>()
+    // per-room throttle for WS-triggered quality re-checks (ms)
+    private val lastQualityCheck = ConcurrentHashMap<Long, Long>()
+    private val qualityHintMinIntervalMs = 30_000L
 
     override suspend fun onStart(scope: CoroutineScope) {
         subscribe<RoomStatusChanged>(RoomStatusChanged::class)
@@ -95,15 +103,22 @@ class SessionComponent(
         subscribe<QualityChangeRequested>(QualityChangeRequested::class)
         subscribe<RoomTimeLimitChanged>(RoomTimeLimitChanged::class)
         subscribe<RoomSizeLimitChanged>(RoomSizeLimitChanged::class)
+        subscribe<QualityChangeHint>(QualityChangeHint::class)
 
         eventBus.subscribe(scope, PersistConfig::class) {
             decryptKeyCache.clear()
         }
 
         scope.launch {
+            // quality rarely changes — poll infrequently to save network
+            while (isActive) {
+                delay(5.minutes)
+                pollQualities()
+            }
+        }
+        scope.launch {
             while (isActive) {
                 delay(30.seconds)
-                pollQualities()
                 cleanStaleSessions()
             }
         }
@@ -117,6 +132,7 @@ class SessionComponent(
         is QualityChangeRequested -> OnSessionEvent(event)
         is RoomTimeLimitChanged -> OnSessionEvent(event)
         is RoomSizeLimitChanged -> OnSessionEvent(event)
+        is QualityChangeHint -> OnSessionEvent(event)
         is CommandEnvelope -> HandleSessionCommand(event)
         else -> null
     }
@@ -135,7 +151,12 @@ class SessionComponent(
                             downloader.tell(
                                 DoCutPoint(
                                     CutPoint(
-                                        msg.roomId, rs.segmentIndex - 1, rs.roomName, Instant.now(), msg.reason, rs.quality
+                                        msg.roomId,
+                                        rs.segmentIndex - 1,
+                                        rs.roomName,
+                                        Instant.now(),
+                                        msg.reason,
+                                        rs.quality
                                     )
                                 )
                             )
@@ -202,55 +223,83 @@ class SessionComponent(
                 rs.token = token.takeIf { it.isNotEmpty() }
                 lastBlockReason.remove(roomId)
             }
+
+            if (sessions[roomId] !== rs || rs.state == SessionState.Closing) return@launch
+
             val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
+            if (sessions[roomId] !== rs || rs.state == SessionState.Closing) return@launch
             rs.timeLimit = config.timeLimit
             rs.sizeLimitBytes = config.sizeLimitBytes
             try {
                 rs.masterPlaylist = fetchAndCacheMasterPlaylist(rs)
                 val availableNames = rs.masterPlaylist!!.variants.map { it.name }
-                val selected = selectQuality(availableNames, rs.quality)
-                rs.quality = selected
-                rs.targetquality = selected
+                rs.quality = selectQuality(availableNames, rs.targetquality)
                 rs.playlistUrl = resolveVariantUrl(rs)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                logger.error("[{}] Master playlist failed, falling back to API: {}", rs.roomName, e.message, e)
-                val qualities = apiClient.roomQualities(rs.roomName)
-                val selected = selectQuality(qualities, rs.quality)
-                val rawQuality = qualities.firstOrNull()
-                val useRaw = selected == rawQuality
-                rs.quality = selected
-                rs.targetquality = selected
-                rs.playlistUrl = buildFallbackPlaylistUrl(rs, useRaw)
+                if (e is ResponseException) {
+                    logger.warn("[{}] Master playlist failed: status={}", rs.roomName, e.response.status)
+                } else {
+                    logger.error("[{}] Master playlist failed: {}", rs.roomName, e.message, e)
+                }
+                sessions.remove(roomId)
+                delay(5.seconds)
+                requestBus.request<OkResponse>(RefreshRoomCmd(roomId))
+                return@launch
             }
-            logger.info("Session starting: roomId={}, name={}, quality={}", roomId, name, rs.quality)
-            dataChannel.send(StreamStart(roomId, name, rs.startTime, rs.quality))
-            rs.pollingJob = launch { pollingLoop(rs) }
-            eventBus.publish(RecordingStarted(roomId, rs.quality))
+
+            if (sessions[roomId] !== rs || rs.state == SessionState.Closing) return@launch
+
+            // Commit atomically with stopSession so a stop cannot be interleaved
+            // between StreamStart and polling-loop registration.
+            rs.mutex.withLock {
+                if (sessions[roomId] !== rs || rs.state == SessionState.Closing) return@launch
+                logger.info("Session starting: roomId={}, name={}, quality={}", roomId, name, rs.quality)
+                dataChannel.send(StreamStart(roomId, name, rs.startTime, rs.quality))
+                rs.pollingJob = launch { pollingLoop(rs) }
+                eventBus.publish(RecordingStarted(roomId, rs.quality))
+            }
         }
     }
 
     private suspend fun stopSession(roomId: Long) {
         val rs = sessions[roomId] ?: return
-        logger.info("Session stopping: roomId={}, name={}, state={}", roomId, rs.roomName, rs.state)
-        rs.state = SessionState.Closing
-        rs.pollingJob?.cancel()
-        downloader.tell(DoCutPoint(CutPoint(roomId, rs.segmentIndex, rs.roomName, Instant.now(), EndReason.UserStop, rs.quality)))
+        rs.mutex.withLock {
+            logger.info("Session stopping: roomId={}, name={}, state={}", roomId, rs.roomName, rs.state)
+            rs.state = SessionState.Closing
+            rs.pollingJob?.cancel()
+            downloader.tell(
+                DoCutPoint(
+                    CutPoint(
+                        roomId,
+                        rs.segmentIndex,
+                        rs.roomName,
+                        Instant.now(),
+                        EndReason.UserStop,
+                        rs.quality
+                    )
+                )
+            )
+        }
     }
 
     private suspend fun handleEvent(event: Any) {
         when (event) {
             is RoomStatusChanged -> {
                 val rs = sessions[event.roomId] ?: return
-                if (event.newStatus == "public" || event.newStatus == "groupShow" || event.newStatus == "private") {
+                if (RoomStatus.isPublic(event.newStatus) || RoomStatus.isGroupShow(event.newStatus) ||
+                    RoomStatus.isPrivate(event.newStatus)
+                ) {
                     if (rs.state == SessionState.Armed) {
-                        if (event.newStatus == "groupShow" || event.newStatus == "private") {
-                            // SchedulerComponent handles groupShow via DoStart→startSession→configureSession
+                        if (RoomStatus.isGroupShow(event.newStatus) || RoomStatus.isPrivate(event.newStatus)) {
+                            // SchedulerComponent handles paid/private shows via DoStart→startSession→configureSession
                             return
                         }
                         startSession(event.roomId, rs.roomName, rs.quality, rs.pkey)
                     }
 
-                } else if (event.newStatus == "offline") {
+                } else if (RoomStatus.isOffline(event.newStatus)) {
                     if (rs.state == SessionState.Recording) {
                         rs.state = SessionState.Closing
                         rs.pollingJob?.cancel()
@@ -258,7 +307,12 @@ class SessionComponent(
                         downloader.tell(
                             DoCutPoint(
                                 CutPoint(
-                                    event.roomId, rs.segmentIndex, rs.roomName, Instant.now(), EndReason.StreamEnd, rs.quality
+                                    event.roomId,
+                                    rs.segmentIndex,
+                                    rs.roomName,
+                                    Instant.now(),
+                                    EndReason.StreamEnd,
+                                    rs.quality
                                 )
                             )
                         )
@@ -267,7 +321,12 @@ class SessionComponent(
             }
 
             is LiveMessage -> {
-                dataChannel.send(StreamEvent(event.roomId, Instant.now(), event.body.toString()))
+                // record the event type alongside its payload in the .event file
+                val json = buildJsonObject {
+                    put("type", event.type)
+                    put("data", event.body)
+                }.toString()
+                dataChannel.send(StreamEvent(event.roomId, Instant.now(), json))
             }
 
             is QualitiesAvailable -> {
@@ -283,7 +342,10 @@ class SessionComponent(
                         event.qualities
                     )
                     rs.quality = newQuality
-                    rs.playlistUrl = resolveVariantUrl(rs)
+                    val resolved = resolveVariantUrl(rs)
+                    if (rs.playlistUrl != resolved)
+                        logger.debug("[{}] playlist url changed {} -> {}", rs.roomName, rs.playlistUrl, resolved)
+                    rs.playlistUrl = resolved
                 } else {
 //                    logger.debug(
 //                        "Quality unchanged for {}: {} (available: {})", rs.roomName, rs.quality, event.qualities
@@ -298,6 +360,17 @@ class SessionComponent(
                 if (rs.state == SessionState.Recording || rs.state == SessionState.Fetching) {
                     pollQualityForRoom(rs)
                 }
+            }
+
+            is QualityChangeHint -> {
+                // WS reported a settings/stream change — re-check quality (throttled)
+                val rs = sessions[event.roomId] ?: return
+                if (rs.state != SessionState.Recording) return
+                val now = System.currentTimeMillis()
+                val last = lastQualityCheck[event.roomId] ?: 0L
+                if (now - last < qualityHintMinIntervalMs) return
+                lastQualityCheck[event.roomId] = now
+                pollQualityForRoom(rs, force = true)
             }
 
             is RoomTimeLimitChanged -> {
@@ -344,28 +417,31 @@ class SessionComponent(
     private suspend fun pollQualities() {
         for (rs in sessions.values) {
             if (rs.state != SessionState.Recording) continue
+            // already recording at the requested quality — nothing to chase; settings
+            // changes are caught by the WS QualityChangeHint instead
+            if (rs.quality == rs.targetquality) continue
             pollQualityForRoom(rs)
         }
     }
 
-    private suspend fun pollQualityForRoom(rs: RoomSession) {
+    private suspend fun pollQualityForRoom(rs: RoomSession, force: Boolean = false) {
+        // Already on the user-requested quality: keep the periodic loop alive but
+        // do nothing to avoid unnecessary master playlist requests. A forced check
+        // (WS settings-change hint) still re-fetches.
+        if (!force && rs.quality == rs.targetquality) return
+
         try {
             val master = fetchAndCacheMasterPlaylist(rs)
             val availableNames = master.variants.map { it.name }
             if (availableNames.isNotEmpty()) {
                 eventBus.publish(QualitiesAvailable(rs.roomId, availableNames))
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: ResponseException) {
+            logger.warn("[{}] Master playlist quality poll failed: status={}", rs.roomName, e.response.status)
         } catch (e: Exception) {
-            logger.error("[{}] Master playlist poll failed, falling back to API: {}", rs.roomName, e.message, e)
-            try {
-                val qualities = apiClient.roomQualities(rs.roomName)
-                if (qualities.isNotEmpty()) {
-                    eventBus.publish(QualitiesAvailable(rs.roomId, qualities))
-                }
-            } catch (e: Exception) {
-                logger.error("[{}] Both master and API quality poll failed", rs.roomName, e)
-                // both master and API failed; ignore
-            }
+            logger.error("[{}] Master playlist quality poll failed: {}", rs.roomName, e.message, e)
         }
     }
 
@@ -384,56 +460,9 @@ class SessionComponent(
         try {
             val info = apiClient.roomFetchBroadcastInfo(roomName)
             val status = info.PathSingle("item.status").asString()
-            when (status) {
-                "public" -> return ""
-                "private" -> {
-                    val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
-                    sessions[roomId]?.let { rs ->
-                        rs.timeLimit = config.timeLimit
-                        rs.sizeLimitBytes = config.sizeLimitBytes
-                    }
-                    if (!config.autoPaySpy) {
-                        val reason = "autopay disabled"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] Room not enable autopay", roomName)
-                        return null
-                    }
-                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
-                    // Hard gate: only proceed with an account that has genuine
-                    // fan-club free-spy access to THIS model, per hasFreeSpyAccess.
-                    // Private shows are believed to bill per-minute server-side
-                    // (unlike groupShow's flat ticket price), and there's no
-                    // confirmed request/response shape for that billing yet, so we
-                    // don't attempt to pay for access we don't already have.
-                    //
-                    // To record regardless of free-access status instead, replace
-                    // the line below with: val u = users.firstOrNull()
-                    val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
-                    if (u == null) {
-                        val reason = "no free spy access"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] No account has free spy access for this room", roomName)
-                        return null
-                    }
-                    // NOTE: unlike groupShow, entering a private show appears to be a
-                    // stateful action rather than a one-shot ticket purchase - the
-                    // server doesn't seem to populate modelToken on the cam-info
-                    // response until after this PUT is sent, even for accounts with
-                    // standing (fan-club) access. But it doesn't hurt to see if we
-                    // have a token.
-                    var token = apiClient.roomFetchModelToken(roomName, u)
-                    if (token == null) {
-                        apiClient.roomRequestSpyShow(roomId, u)
-                        delay(2.seconds)
-                        token = apiClient.roomFetchModelToken(roomName, u)
-                    }
-                    if (token == null) {
-                        logger.warn("[{}] Failed to get model token", roomName)
-                        return null
-                    }
-                    return token
-                }
-                "groupShow" -> {
+            when {
+                RoomStatus.isPublic(status) -> return ""
+                RoomStatus.isGroupShow(status) -> {
                     val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
                     sessions[roomId]?.let { rs ->
                         rs.timeLimit = config.timeLimit
@@ -469,6 +498,63 @@ class SessionComponent(
                     return token
                 }
 
+                // paid/private shows (private/p2p/virtualPrivate/...): price and token are only
+                // visible on AUTHENTICATED camInfo (anonymous user == null for these rooms)
+                RoomStatus.isPrivate(status) -> {
+                    val config = requestBus.request<RoomConfigResponse>(GetRoomConfig(roomId))
+                    sessions[roomId]?.let { rs ->
+                        rs.timeLimit = config.timeLimit
+                        rs.sizeLimitBytes = config.sizeLimitBytes
+                    }
+                    if (!config.autoPaySpy) {
+                        val reason = "autopay disabled"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] Room not enable autopay (private)", roomName)
+                        return null
+                    }
+                    val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
+                    if (u == null) {
+                        val reason = "no account"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] No user account to use for private show", roomName)
+                        return null
+                    }
+                    val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
+                    // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
+                    // (confirmed: anonymous camInfo has no user object for p2p rooms)
+                    val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
+                        val reason = "price unavailable"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] privateRate not found in authenticated camInfo", roomName)
+                        return null
+                    }
+                    if (u.coins < price) {
+                        val reason = "insufficient balance"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] No account to pay. price={}", roomName, price)
+                        return null
+                    }
+                    var token = camInfo.PathSingle("cam.modelToken").asString().ifBlank { null }
+                    if (token == null) {
+                        // TODO: verify the spy endpoint verb/params/idempotency and the modelToken
+                        // fill timing on a real private show; the bounded retry below is a guess
+                        apiClient.roomRequestSpyShow(roomId, u)
+                        for (attempt in 1..4) {
+                            delay(if (attempt == 1) 500L else 1500L)
+                            val cam = apiClient.roomFetchCamInfo(roomName, u.cookie)
+                            token = cam.PathSingle("cam.modelToken").asString().ifBlank { null }
+                            if (token != null) break
+                        }
+                    }
+                    if (token == null) {
+                        val reason = "no token"
+                        if (lastBlockReason.put(roomId, reason) != reason)
+                            logger.warn("[{}] Failed to get private-show model token", roomName)
+                        return null
+                    }
+                    return token
+                }
+
                 else -> {
                     logger.trace("[{}] -> false, status={}", roomName, status)
                     return null
@@ -483,45 +569,51 @@ class SessionComponent(
         return null
     }
 
-    private fun buildMasterUrl(rs: RoomSession): String = buildUrl {
-        protocol = URLProtocol.HTTPS
-        host = "edge-hls.doppiocdn.org"
-        encodedPath = "hls/${rs.roomId}/master/${rs.roomId}_auto.m3u8"
-        rs.token?.let { parameters["aclAuth"] = it }
-    }.toString()
-
-    private fun buildFallbackPlaylistUrl(rs: RoomSession, useRaw: Boolean = false): String {
-        val token = rs.token
-        return buildUrl {
+    private fun buildMasterUrl(rs: RoomSession, host: String = Hosts.current.hlsMasterHost): String =
+        buildUrl {
             protocol = URLProtocol.HTTPS
-            host = "media-hls.doppiocdn.org"
-            encodedPath = if (useRaw) "b-hls-%d/%d/%d.m3u8".format(
-                22, rs.roomId, rs.roomId
-            ) else "b-hls-%d/%d/%d_%s.m3u8".format(
-                22, rs.roomId, rs.roomId, rs.quality
-            )
+            this.host = host
+            encodedPath = "/hls/${rs.roomId}/master/${rs.roomId}_auto.m3u8"
             parameters["psch"] = "v2"
             parameters["pkey"] = rs.pkey
-            if (token != null) {
-                parameters["aclAuth"] = token
-            }
+            rs.token?.takeIf { it.isNotEmpty() }?.let { parameters["aclAuth"] = it }
         }.toString()
-    }
 
     private suspend fun fetchAndCacheMasterPlaylist(rs: RoomSession): MasterPlaylist {
-        val client = ClientManager.getProxiedClient("master_${rs.roomId}")
-        val url = buildMasterUrl(rs)
-        val response = withRetry(3) { client.get(url) }
-        val text = response.bodyAsText()
-        val master = m3u8Parser.parseMaster(text)
-        rs.masterPlaylist = master
-        val keyIds = master.pschKeys.map { it.substringAfter(":") }
-        val match = requestBus.request<DecryptKeyMatch>(MatchDecryptKeys(keyIds))
-        require(match.decryptKey.isNotEmpty()) {
-            "[${rs.roomName}] No PSCH key from master playlist matched in persistedDecryptKeys. keys=$keyIds"
+        val client = ClientManager.getProxiedClient("master_" + rs.roomId)
+        val hosts = (listOf(Hosts.current.hlsMasterHost) + Hosts.current.hlsHosts).distinct()
+        var lastErr: Throwable? = null
+        for (host in hosts) {
+            val url = buildMasterUrl(rs, host)
+            try {
+                val response = withRetry(3) { client.get(url) }
+                val text = response.bodyAsText()
+                val master = m3u8Parser.parseMaster(text)
+                rs.masterPlaylist = master
+                val keyIds = master.pschKeys.map { it.substringAfter(":") }
+                val match = requestBus.request<DecryptKeyMatch>(MatchDecryptKeys(keyIds))
+                require(match.decryptKey.isNotEmpty()) {
+                    "[" + rs.roomName + "] No PSCH key from master playlist matched in persistedDecryptKeys. keys=" + keyIds
+                }
+                rs.pkey = match.keyName
+                return master
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: ClientRequestException) {
+                if (e.response.status.value in 400..499) {
+                    logger.warn("[{}] master playlist business error on {}: {}", rs.roomName, host, e.response.status)
+                    throw e
+                }
+                lastErr = e
+                CdnSelector.recordFailure(host)
+                logger.warn("[{}] master playlist fetch failed on {}: {}", rs.roomName, host, e.message)
+            } catch (e: Exception) {
+                lastErr = e
+                CdnSelector.recordFailure(host)
+                logger.warn("[{}] master playlist fetch failed on {}: {}", rs.roomName, host, e.message)
+            }
         }
-        rs.pkey = match.keyName
-        return master
+        throw lastErr ?: IllegalStateException("master playlist unavailable")
     }
 
     private fun resolveVariantUrl(rs: RoomSession): String {
@@ -534,11 +626,14 @@ class SessionComponent(
             mp.variants.find { it.name == matched }
         }
         val baseUrl = variant?.url ?: mp.variants.maxByOrNull { it.bandwidth }!!.url
-        return buildUrl {
+        val url = buildUrl {
             takeFrom(baseUrl)
             parameters["psch"] = "v2"
             parameters["pkey"] = rs.pkey
+            rs.token?.takeIf { it.isNotEmpty() }?.let { parameters["aclAuth"] = it }
         }.toString()
+        // rewrite the playlist host to the currently selected (fastest) CDN host
+        return CdnSelector.resolve(url)
     }
 
     private fun createDiscontinuityCounter(): suspend (List<Int>) -> Int {
@@ -571,6 +666,7 @@ class SessionComponent(
             val counter = createDiscontinuityCounter()
             var firstPoll = true
             while (isActive && (rs.state == SessionState.Fetching || rs.state == SessionState.Recording)) {
+                logger.trace("[{}] poll", rs.roomName)
                 val pollDelay = if (firstPoll) {
                     3.seconds + Random.nextLong(-500, 500).milliseconds
                 } else {
@@ -605,7 +701,12 @@ class SessionComponent(
                         downloader.tell(
                             DoCutPoint(
                                 CutPoint(
-                                    rs.roomId, rs.segmentIndex - 1, rs.roomName, Instant.now(), EndReason.NewInit, rs.quality
+                                    rs.roomId,
+                                    rs.segmentIndex - 1,
+                                    rs.roomName,
+                                    Instant.now(),
+                                    EndReason.NewInit,
+                                    rs.quality
                                 )
                             )
                         )
@@ -632,6 +733,7 @@ class SessionComponent(
                         if (gap > 0) {
                             eventBus.publish(SegmentGapDetected(rs.roomId, gap))
                         }
+                        logger.debug("[{}] fetched {} segments", rs.roomName, unseen.size)
                         eventBus.publish(NewSegments(rs.roomId, unseen))
                         downloader.tell(DoDownload(Download(rs.roomId, unseen, rs.segmentIndex, rs.generation)))
                         rs.segmentIndex += unseen.size
@@ -686,7 +788,7 @@ class SessionComponent(
                     }
                     throw e
                 } catch (e: ClientRequestException) {
-                    logger.error("[${rs.roomName}] Client request error in polling: status=${e.response.status}", e)
+                    logger.error("[${rs.roomName}] Client request error in polling: status=${e.response.status}")
                     if (e.response.status == HttpStatusCode.Forbidden) {
                         val token = configureSession(rs.roomId, rs.roomName)
                         if (token != null) {
@@ -741,19 +843,37 @@ class SessionComponent(
                     }
                 } catch (e: Exception) {
                     logger.error("[{}] Unexpected error in polling", rs.roomName, e)
+                    CdnSelector.recordFailure(CdnSelector.hostOf(rs.playlistUrl))
                     if (configureSession(rs.roomId, rs.roomName) == null) {
                         logger.info("[STOP] [{}] Room off or non-public", rs.roomName)
+                        rs.state = SessionState.Closing
+                        downloader.tell(
+                            DoCutPoint(
+                                CutPoint(
+                                    rs.roomId,
+                                    rs.segmentIndex - 1,
+                                    rs.roomName,
+                                    Instant.now(),
+                                    EndReason.UserStop,
+                                    rs.quality
+                                )
+                            )
+                        )
+                        break
                     }
                     try {
                         rs.masterPlaylist = fetchAndCacheMasterPlaylist(rs)
                         rs.playlistUrl = resolveVariantUrl(rs)
-                    } catch (e: Exception) {
-                        logger.error("[{}] Failed to refresh master playlist during recovery", rs.roomName, e)
+                    } catch (e2: Exception) {
+                        logger.error("[{}] Failed to refresh master playlist during recovery", rs.roomName, e2)
                         continue
                     }
                 }
             }
+        } catch (e: Exception) {
+            logger.error("[{}] polling failed", rs.roomName, e)
         } finally {
+            rs.state = SessionState.Closing
             withContext(NonCancellable) {
                 eventBus.publish(RecordingStopped(rs.roomId))
             }

@@ -6,14 +6,21 @@ import github.rikacelery.v3.components.*
 import github.rikacelery.v3.core.DataChannel
 import github.rikacelery.v3.core.EventBus
 import github.rikacelery.v3.core.RequestBus
+import github.rikacelery.v3.data.Hosts
+import github.rikacelery.v3.data.HostsConfig
 import github.rikacelery.v3.data.SystemConfig
 import github.rikacelery.v3.utils.SensitiveStringRegistry
 import github.rikacelery.v3.events.*
 import github.rikacelery.v3.hooks.EventHook
 import github.rikacelery.v3.m3u8.M3u8Parser
+import github.rikacelery.v3.utils.CdnSelector
+import github.rikacelery.v3.utils.SensitiveStringRegistry
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineName
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -29,7 +36,9 @@ import java.io.File
 private data class PersistedConfig(
     val pkey: String,
     val decryptKeys: Map<String, String>,
-    val maskSensitiveLogs: Boolean
+    val maskSensitiveLogs: Boolean,
+    val hosts: HostsConfig,
+    val apiToken: String
 )
 
 private val mainLogger = LoggerFactory.getLogger("v3.Main")
@@ -38,7 +47,7 @@ private fun loadPersistedConfig(configPath: String): PersistedConfig {
     val file = File(configPath)
     val key = "YzWScuyQRGAGcxx1KIJmiQ7BY9Vi35ftwLqUOVO8uoo="
     val pkey = "Fq6m2TO2ZeBkRPm9"
-    val default = PersistedConfig(pkey, mapOf(pkey to key), true)
+    val default = PersistedConfig(pkey, mapOf(pkey to key), true, HostsConfig.DEFAULT, "")
     if (!file.exists()) return default
     try {
         val json = Json.parseToJsonElement(file.readText()).jsonObject
@@ -46,7 +55,9 @@ private fun loadPersistedConfig(configPath: String): PersistedConfig {
         val keys = mutableMapOf(pkey to key)
         json["decryptKeys"]?.jsonObject?.forEach { (k, v) -> keys[k] = v.jsonPrimitive.content }
         val mask = json["maskSensitiveLogs"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true
-        return PersistedConfig(pkey, keys, mask)
+        val hosts = HostsConfig.fromJson(json)
+        val apiToken = json["apiToken"]?.jsonPrimitive?.content ?: ""
+        return PersistedConfig(pkey, keys, mask, hosts, apiToken)
     } catch (e: Exception) {
         mainLogger.error("Failed to load persisted config from $configPath", e)
         return default
@@ -70,8 +81,11 @@ fun main(vararg args: String) {
         return
     }
 
-    runBlocking(Dispatchers.Default) {
-        val appScope = this
+    runBlocking {
+        // Components run on a shared Default pool: each actor still processes its
+        // mailbox serially, but different components can work in parallel. Blocking
+        // IO is dispatched explicitly with withContext(Dispatchers.IO) at each site.
+        val appScope = CoroutineScope(Dispatchers.Default + SupervisorJob() + CoroutineName("xhrec-app"))
 
         val configPath = "xhrec.json"
         val persisted = loadPersistedConfig(configPath)
@@ -83,14 +97,17 @@ fun main(vararg args: String) {
             proxy = System.getenv("http_proxy"),
             decryptKeys = persisted.decryptKeys,
             streamAuthKey = persisted.pkey,
-            authToken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJzdWIiOiItMTA4MSIsImluZm8iOnsiaXNHdWVzdCI6dHJ1ZSwidXNlcklkIjotMTA4MX19.IXF36-UfCEmOPGvhl2a19rgLsh2rDCdXNJ3su9LkA9Y",
-            platformHost = "xhamsterlive.com",
+            hosts = persisted.hosts,
             listConfPath = cli.getOptionValue("file", "list.conf"),
             configPath = configPath,
-            maskSensitiveLogs = persisted.maskSensitiveLogs
+            maskSensitiveLogs = persisted.maskSensitiveLogs,
+            apiToken = persisted.apiToken
         )
 
-        // Apply mask config from persisted config
+        // Apply persisted runtime config before components start making API calls
+        Hosts.current = persisted.hosts
+        ApiClient.applyHosts(persisted.hosts.platformHosts)
+        CdnSelector.updateHosts(persisted.hosts.hlsHosts)
         SensitiveStringRegistry.enabled = persisted.maskSensitiveLogs
 
         // 1. Core infrastructure
@@ -101,7 +118,9 @@ fun main(vararg args: String) {
         dataChannel.installHook(mseStore)
         eventBus.installHook(object : EventHook {
             override suspend fun intercept(event: Any): Any {
-
+                if (mainLogger.isTraceEnabled){
+                    mainLogger.trace("[BUS] {}",event)
+                }
                 return event
             }
         })
@@ -112,8 +131,10 @@ fun main(vararg args: String) {
         val configComponent = ConfigComponent(config, eventBus, appScope)
         val authComponent = AuthComponent(cli.getOptionValue("users", "users.txt"), eventBus, appScope)
         val roomComponent =
-            RoomComponent(ApiClient, config.listConfPath, config.platformHost, requestBus, eventBus, appScope)
-        val liveEventSource = LiveEventSource(config.authToken, eventBus, appScope)
+            RoomComponent(ApiClient, config.listConfPath, requestBus, eventBus, appScope)
+        // WS auth JWT is fetched dynamically at startup from config/initial (guest session),
+        // refreshed on auth failure or after its (unknown) validity window.
+        val liveEventSource = LiveEventSource({ ApiClient.fetchGuestWsToken() }, eventBus, appScope)
 
         val downloaderComponent = DownloaderComponent(
             dataChannel, eventBus = eventBus, parentScope = appScope, initialConcurrency = 64
@@ -133,7 +154,7 @@ fun main(vararg args: String) {
             eventBus,
             appScope
         )
-        val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope)
+        val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope, config.streamAuthKey)
 
         val httpServer = HttpServerComponent(
             config.port,
@@ -142,7 +163,8 @@ fun main(vararg args: String) {
             metricComponent,
             postProcessorComponent,
             appScope,
-            mseStore
+            mseStore,
+            config.apiToken
         )
 
 
@@ -255,6 +277,7 @@ fun main(vararg args: String) {
             authComponent.stop()
             configComponent.stop()
             dataChannel.close()
+            appScope.cancel()
             println("XhRec v3 shut down")
         }
     }

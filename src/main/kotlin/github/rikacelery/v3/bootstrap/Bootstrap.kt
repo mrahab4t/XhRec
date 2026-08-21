@@ -5,9 +5,11 @@ import github.rikacelery.v3.components.*
 import github.rikacelery.v3.utils.SensitiveStringRegistry
 import github.rikacelery.v3.exceptions.RenameException
 import github.rikacelery.v3.postprocessors.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 import org.apache.commons.cli.DefaultParser
 import org.apache.commons.cli.Options
@@ -78,7 +80,9 @@ class Bootstrap(
         if (!file.exists()) {
             logger.warn("users.txt not found"); return
         }
-        val cookies = file.readLines().filter { it.isNotBlank() && !it.startsWith("#") && !it.startsWith(";") }
+        val cookies = withContext(Dispatchers.IO) {
+            file.readLines().filter { it.isNotBlank() && !it.startsWith("#") && !it.startsWith(";") }
+        }
         val users = cookies.mapNotNull { cookie ->
             try {
                 apiClient.getUserFromCookie(cookie.trim()).also { SensitiveStringRegistry.mask(it.username) }
@@ -90,12 +94,12 @@ class Bootstrap(
         logger.info("Loaded ${users.size} users")
     }
 
-    private fun loadProcessors(cli: CliConfig) {
+    private suspend fun loadProcessors(cli: CliConfig) {
         val file = File(cli.postProcessorPath)
         if (!file.exists()) {
             logger.warn("postprocessor.json not found"); return
         }
-        val json = file.readText()
+        val json = withContext(Dispatchers.IO) { file.readText() }
         val processors = parseProcessorConfig(json)
         postProcessorComponent.setProcessors(processors)
         logger.info("Loaded ${processors.size} processors")
@@ -157,7 +161,9 @@ class Bootstrap(
         if (!file.exists()) {
             logger.warn("list.conf not found"); return
         }
-        val lines = file.readLines().filter { it.isNotBlank() && !it.trimStart().startsWith(";") }
+        val lines = withContext(Dispatchers.IO) {
+            file.readLines().filter { it.isNotBlank() && !it.trimStart().startsWith(";") }
+        }
         coroutineScope {
             val idx = AtomicInteger(1)
             lines.map { line ->
@@ -185,7 +191,7 @@ class Bootstrap(
         logger.info("Loaded rooms from list.conf")
     }
 
-    private fun addRoomFromParsed(id: Long, name: String, parsed: ListConfLine) {
+    private suspend fun addRoomFromParsed(id: Long, name: String, parsed: ListConfLine) {
         SensitiveStringRegistry.mask(name)
         val timeLimit = if (parsed.timeLimit > 0) parsed.timeLimit.seconds else Duration.INFINITE
         roomComponent.internalAdd(id, name, parsed.quality, timeLimit, parsed.sizeLimit, parsed.autoPayTicket, parsed.autoPaySpy, parsed.pkey)
@@ -210,9 +216,7 @@ class Bootstrap(
                 parts[i].startsWith("limit:") -> timeLimit = parts[i].substring(6).toLong()
                 parts[i].startsWith("size:") -> sizeLimit = parseSize(parts[i].substring(5))
                 parts[i].startsWith("pkey:") -> pkey = parts[i].substring(5)
-                // Bare "autopay" is kept for backward compatibility with existing
-                // list.conf files and enables both. "autopay:ticket"/"autopay:private"
-                // enable just one; they can also be combined on the same line.
+                // bare "autopay" keeps backward compatibility and enables both kinds
                 parts[i] == "autopay" -> {
                     autoPayTicket = true
                     autoPaySpy = true

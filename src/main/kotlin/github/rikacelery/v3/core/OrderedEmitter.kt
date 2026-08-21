@@ -9,6 +9,8 @@ class OrderedEmitter(
     private val roomId: Long,
     private val output: suspend (DataChannelMsg) -> Unit
 ) {
+    // complete() is called concurrently from downloader workers; the buffer and
+    // nextIndex must be mutated under a single lock (drain may suspend on output()).
     private val mutex = Mutex()
     private var nextIndex = 0L
     private val buffer = sortedMapOf<Long, DownloadResult>()

@@ -5,6 +5,8 @@ import github.rikacelery.v3.core.EventBus
 import github.rikacelery.v3.data.User
 import github.rikacelery.v3.events.*
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
@@ -40,7 +42,8 @@ class AuthComponent(
             is AuthExpired -> { users.remove(msg.event.userId); logger.info("User ${msg.event.userId} expired, removed") }
             is PersistConfig -> {
                 try {
-                    File(usersPath).writeText(users.values.joinToString("\n") { it.cookie })
+                    val content = users.values.joinToString("\n") { it.cookie }
+                    withContext(Dispatchers.IO) { File(usersPath).writeText(content) }
                 } catch (e: Exception) {
                     logger.error("Failed to save users.txt: ${e.message}", e)
                 }
@@ -60,7 +63,8 @@ class AuthComponent(
                     OkResponse
                 } else ErrorResponse("user not found: ${env.command.userId}")
             }
-            // else -> ErrorResponse("unknown auth query")
+            // don't ack commands this component doesn't handle — the real handler will;
+            // a stray ErrorResponse here would race the RequestBus and fail legit requests
             else -> return
         }
         eventBus.publish(CommandAck(env.id, ack))

@@ -31,15 +31,14 @@ class MseStore : DataHook {
     }
 
     private data class RoomState(
-        var latestSegment: SegmentEntry? = null,
-        var generation: Int = 0,
-        var init: ByteArray = ByteArray(0),
-        var mime: String = "",
-        var lastAccess: Long = System.currentTimeMillis(),
+        @Volatile var latestSegment: SegmentEntry? = null,
+        @Volatile var generation: Int = 0,
+        @Volatile var init: ByteArray = ByteArray(0),
+        @Volatile var mime: String = "",
+        @Volatile var lastAccess: Long = System.currentTimeMillis(),
         val segCounter: AtomicInteger = AtomicInteger(0),
-        var latestIdx: Int = -1,
-        // val sseChannels: MutableList<SendChannel<SseChunk>> = Collections.synchronizedList(mutableListOf())
-        val sseChannels: MutableSet<SendChannel<SseChunk>> = ConcurrentHashMap.newKeySet()
+        @Volatile var latestIdx: Int = -1,
+        val sseChannels: MutableList<SendChannel<SseChunk>> = Collections.synchronizedList(mutableListOf())
     )
 
     private val rooms = ConcurrentHashMap<Long, RoomState>()
@@ -103,11 +102,15 @@ class MseStore : DataHook {
 
     private fun onStreamEnd(roomId: Long) {
         rooms[roomId]?.generation?.inc()?.let { rooms[roomId]?.generation = it }
+        // terminate open SSE streams so their HTTP connections close instead of lingering
+        rooms[roomId]?.sseChannels?.forEach { it.close() }
+        rooms[roomId]?.sseChannels?.clear()
     }
 
     // ── SSE streaming ───────────────────────────────────────────────
     fun subscribe(roomId: Long): Channel<SseChunk> {
-        val ch = Channel<SseChunk>(Channel.UNLIMITED)
+        // bounded so slow/disconnected clients can't accumulate an unbounded backlog
+        val ch = Channel<SseChunk>(capacity = 64)
         val state = rooms.computeIfAbsent(roomId) { RoomState() }
         state.sseChannels.add(ch)
 

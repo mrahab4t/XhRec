@@ -101,13 +101,12 @@ class WriterComponent(
             withContext(Dispatchers.IO) {
                 hooks.forEach { path = it.beforeFileOpen(msg.roomId, path) }
 
-                val file = File(path)
+            val file = File(path)
+            val eventFile = File("$path.event")
+            val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
+            val bufferedEventFos = BufferedOutputStream(FileOutputStream(eventFile), 8 * 1024)
+            withContext(Dispatchers.IO) {
                 file.parentFile?.mkdirs()
-                val eventFile = File("$path.event")
-
-                val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
-                val bufferedEventFos = BufferedOutputStream(FileOutputStream(eventFile), 8 * 1024)
-
                 files[msg.roomId] = ActiveFile(
                     file = file, eventFile = eventFile,
                     fos = bufferedFos,
@@ -164,7 +163,7 @@ class WriterComponent(
     }
 
     private suspend fun closeActiveFile(active: ActiveFile, reason: EndReason) {
-        withContext(NonCancellable) {
+        withContext(Dispatchers.IO + NonCancellable) {
             try {
                 // Ensure all buffered bytes in memory are written before closing
                 runCatching { active.fos.flush() }
@@ -185,16 +184,27 @@ class WriterComponent(
                 val durFmt = formatDurationHM(durationMs)
                 val finalName = "${active.roomName}-${timeFormatter.format(active.startTime)}-${durFmt}.mp4"
                 val finalFile = File(tmpDir, finalName)
-                val finalEvent = File(tmpDir, "$finalName.event")
 
-                // Robust atomic file move across filesystems / mounts
-                runCatching {
+                val moved = try {
                     Files.move(active.file.toPath(), finalFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                    Files.move(active.eventFile.toPath(), finalEvent.toPath(), StandardCopyOption.REPLACE_EXISTING)
-                }.onFailure { e ->
-                    logger.warn("Files.move failed, falling back to renameTo: ${e.message}")
-                    active.file.renameTo(finalFile)
-                    active.eventFile.renameTo(finalEvent)
+                    true
+                } catch (e: Exception) {
+                    logger.error("Failed to move {} to {}: {}", active.file.absolutePath, finalFile.absolutePath, e.message)
+                    false
+                }
+                if (!moved) {
+                    // Never delete the original file if the move failed; publish it as-is.
+                    eventBus.publish(FileReady(active.roomId, active.file, reason, active.roomName, active.startTime.toEpochMilli(), endTime.toEpochMilli(), durationMs, active.quality))
+                    return@withContext
+                }
+
+                val finalEvent = File(tmpDir, "$finalName.event")
+                if (active.eventFile.exists()) {
+                    try {
+                        Files.move(active.eventFile.toPath(), finalEvent.toPath(), StandardCopyOption.REPLACE_EXISTING)
+                    } catch (e: Exception) {
+                        logger.warn("Failed to move event file {}: {}", active.eventFile.absolutePath, e.message)
+                    }
                 }
 
                 if (finalEvent.exists() && finalEvent.length() == 0L) {
