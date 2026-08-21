@@ -506,7 +506,7 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull() # compilefix
+                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
                     // Only do payment check if use does not have free spy access.
                     val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
                     val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
