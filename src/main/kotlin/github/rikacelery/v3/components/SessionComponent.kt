@@ -506,33 +506,43 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    if (!config.autoPaySpy) {
-                        val reason = "autopay disabled"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] Room not enable autopay (private)", roomName)
-                        return null
-                    }
-                    val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
+                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
+                    // Only do payment check if use does not have free spy access.
+                    val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
                     if (u == null) {
-                        val reason = "no account"
+                        val reason = "no free spy access"
                         if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] No user account to use for private show", roomName)
-                        return null
-                    }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
-                    // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
-                    // (confirmed: anonymous camInfo has no user object for p2p rooms)
-                    val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
-                        val reason = "price unavailable"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] privateRate not found in authenticated camInfo", roomName)
-                        return null
-                    }
-                    if (u.coins < price) {
-                        val reason = "insufficient balance"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] No account to pay. price={}", roomName, price)
-                        return null
+                            logger.warn("[{}] No account has free spy access for this room", roomName)
+                    } else {
+                        if (!config.autoPaySpy) {
+                            val reason = "autopay disabled"
+                            if (lastBlockReason.put(roomId, reason) != reason)
+                                logger.warn("[{}] Room not enable autopay (private)", roomName)
+                            return null
+                        }
+
+                        val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
+                        if (u == null) {
+                            val reason = "no account"
+                            if (lastBlockReason.put(roomId, reason) != reason)
+                                logger.warn("[{}] No user account to use for private show", roomName)
+                            return null
+                        }
+                        val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
+                        // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
+                        // (confirmed: anonymous camInfo has no user object for p2p rooms)
+                        val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
+                            val reason = "price unavailable"
+                            if (lastBlockReason.put(roomId, reason) != reason)
+                                logger.warn("[{}] privateRate not found in authenticated camInfo", roomName)
+                            return null
+                        }
+                        if (u.coins < price) {
+                            val reason = "insufficient balance"
+                            if (lastBlockReason.put(roomId, reason) != reason)
+                                logger.warn("[{}] No account to pay. price={}", roomName, price)
+                            return null
+                        }
                     }
                     var token = camInfo.PathSingle("cam.modelToken").asString().ifBlank { null }
                     if (token == null) {
