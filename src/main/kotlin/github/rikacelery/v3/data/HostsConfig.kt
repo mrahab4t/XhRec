@@ -18,7 +18,7 @@ data class HostsConfig(
     val thumbHost: String = DEFAULT.thumbHost
 ) {
     companion object {
-        const val DEFAULT_PLATFORM_HOST = "stripchat.com"
+        const val DEFAULT_PLATFORM_HOST = "xhamsterlive.com"
         const val DEFAULT_WS_HOST = "websocket-v6.xhamsterlive.com"
         const val DEFAULT_HLS_HOST = "media-hls.doppiocdn.org"
         const val DEFAULT_HLS_MASTER_HOST = "edge-hls.doppiocdn.org"

@@ -39,7 +39,7 @@ internal fun throwBroadcast404(body: String): Nothing {
  * so that 404-based business results (model renamed / deleted) can be detected.
  */
 object ApiClient {
-    const val DEFAULT_PLATFORM_HOST = "stripchat.com"
+    const val DEFAULT_PLATFORM_HOST = "xhamsterlive.com"
 
     private val logger = LoggerFactory.getLogger("v3.ApiClient")
     private val failover = HostFailover(listOf(DEFAULT_PLATFORM_HOST))
