@@ -506,9 +506,10 @@ class SessionComponent(
                         rs.timeLimit = config.timeLimit
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
-                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
+                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull() # compilefix
                     // Only do payment check if use does not have free spy access.
                     val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
+                    val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
                     if (u == null) {
                         val reason = "no free spy access"
                         if (lastBlockReason.put(roomId, reason) != reason)
@@ -528,7 +529,6 @@ class SessionComponent(
                                 logger.warn("[{}] No user account to use for private show", roomName)
                             return null
                         }
-                        val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
                         // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
                         // (confirmed: anonymous camInfo has no user object for p2p rooms)
                         val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {

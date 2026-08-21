@@ -100,7 +100,7 @@ class WriterComponent(
         try {
             withContext(Dispatchers.IO) {
                 hooks.forEach { path = it.beforeFileOpen(msg.roomId, path) }
-
+            }
             val file = File(path)
             val eventFile = File("$path.event")
             val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
