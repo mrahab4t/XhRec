@@ -100,13 +100,14 @@ class WriterComponent(
         try {
             withContext(Dispatchers.IO) {
                 hooks.forEach { path = it.beforeFileOpen(msg.roomId, path) }
-            }
-            val file = File(path)
-            val eventFile = File("$path.event")
-            val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
-            val bufferedEventFos = BufferedOutputStream(FileOutputStream(eventFile), 8 * 1024)
-            withContext(Dispatchers.IO) {
+
+                val file = File(path)
                 file.parentFile?.mkdirs()
+                val eventFile = File("$path.event")
+
+                val bufferedFos = BufferedOutputStream(FileOutputStream(file), 64 * 1024)
+                val bufferedEventFos = BufferedOutputStream(FileOutputStream(eventFile), 8 * 1024)
+
                 files[msg.roomId] = ActiveFile(
                     file = file, eventFile = eventFile,
                     fos = bufferedFos,
