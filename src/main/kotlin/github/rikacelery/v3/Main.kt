@@ -19,6 +19,7 @@ import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
@@ -81,204 +82,192 @@ fun main(vararg args: String) {
         return
     }
 
-    runBlocking(Dispatchers.Default) {
-        // Components run on a shared Default pool: each actor still processes its
-        // mailbox serially, but different components can work in parallel. Blocking
-        // IO is dispatched explicitly with withContext(Dispatchers.IO) at each site.
-        val appScope = this
+    // Explicit type parameter <Unit> resolves 'Cannot infer type for type parameter T'
+    runBlocking<Unit>(Dispatchers.Default + CoroutineName("xhrec-app")) {
+        // Encapsulate execution inside supervisorScope for sibling isolation
+        supervisorScope {
+            val appScope = this
 
-        val configPath = "xhrec.json"
-        val persisted = loadPersistedConfig(configPath)
+            val configPath = "xhrec.json"
+            val persisted = loadPersistedConfig(configPath)
 
-        val config = SystemConfig(
-            outputDir = File(cli.getOptionValue("output", "out")),
-            tmpDir = File(cli.getOptionValue("tmp", "tmp")),
-            port = cli.getOptionValue("port", "8090").toInt(),
-            proxy = System.getenv("http_proxy"),
-            decryptKeys = persisted.decryptKeys,
-            streamAuthKey = persisted.pkey,
-            hosts = persisted.hosts,
-            listConfPath = cli.getOptionValue("file", "list.conf"),
-            configPath = configPath,
-            maskSensitiveLogs = persisted.maskSensitiveLogs,
-            apiToken = persisted.apiToken
-        )
+            val config = SystemConfig(
+                outputDir = File(cli.getOptionValue("output", "out")),
+                tmpDir = File(cli.getOptionValue("tmp", "tmp")),
+                port = cli.getOptionValue("port", "8090").toInt(),
+                proxy = System.getenv("http_proxy"),
+                decryptKeys = persisted.decryptKeys,
+                streamAuthKey = persisted.pkey,
+                hosts = persisted.hosts,
+                listConfPath = cli.getOptionValue("file", "list.conf"),
+                configPath = configPath,
+                maskSensitiveLogs = persisted.maskSensitiveLogs,
+                apiToken = persisted.apiToken
+            )
 
-        // Apply persisted runtime config before components start making API calls
-        Hosts.current = persisted.hosts
-        ApiClient.applyHosts(persisted.hosts.platformHosts)
-        CdnSelector.updateHosts(persisted.hosts.hlsHosts)
-        SensitiveStringRegistry.enabled = persisted.maskSensitiveLogs
+            // Apply persisted runtime config before components start making API calls
+            Hosts.current = persisted.hosts
+            ApiClient.applyHosts(persisted.hosts.platformHosts)
+            CdnSelector.updateHosts(persisted.hosts.hlsHosts)
+            SensitiveStringRegistry.enabled = persisted.maskSensitiveLogs
 
-        // 1. Core infrastructure
-        val eventBus = EventBus()
-        val requestBus = RequestBus(eventBus, appScope)
-        val dataChannel = DataChannel()
-        val mseStore = MseStore()
-        dataChannel.installHook(mseStore)
-        eventBus.installHook(object : EventHook {
-            override suspend fun intercept(event: Any): Any {
-                if (mainLogger.isTraceEnabled){
-                    mainLogger.trace("[BUS] {}",event)
+            // 1. Core infrastructure
+            val eventBus = EventBus()
+            val requestBus = RequestBus(eventBus, appScope)
+            val dataChannel = DataChannel()
+            val mseStore = MseStore()
+            dataChannel.installHook(mseStore)
+            eventBus.installHook(object : EventHook {
+                override suspend fun intercept(event: Any): Any {
+                    if (mainLogger.isTraceEnabled){
+                        mainLogger.trace("[BUS] {}", event)
+                    }
+                    return event
                 }
-                return event
+            })
+
+            // 2. Components
+            val metricComponent = MetricComponent(eventBus, appScope)
+            val configComponent = ConfigComponent(config, eventBus, appScope)
+            val authComponent = AuthComponent(cli.getOptionValue("users", "users.txt"), eventBus, appScope)
+            val roomComponent = RoomComponent(ApiClient, config.listConfPath, requestBus, eventBus, appScope)
+            val liveEventSource = LiveEventSource({ ApiClient.fetchGuestWsToken() }, eventBus, appScope)
+
+            val downloaderComponent = DownloaderComponent(
+                dataChannel, eventBus = eventBus, parentScope = appScope, initialConcurrency = 64
+            )
+            val writerComponent = WriterComponent(
+                dataChannel, config.tmpDir,
+                eventBus = eventBus, parentScope = appScope
+            )
+            val postProcessorComponent = PostProcessorComponent(eventBus = eventBus, parentScope = appScope)
+            val sessionComponent = SessionComponent(
+                dataChannel,
+                downloaderComponent,
+                M3u8Parser,
+                requestBus,
+                ApiClient,
+                config.streamAuthKey,
+                eventBus,
+                appScope
+            )
+            val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope, config.streamAuthKey)
+
+            val httpServer = HttpServerComponent(
+                config.port,
+                eventBus,
+                requestBus,
+                metricComponent,
+                postProcessorComponent,
+                appScope,
+                mseStore,
+                config.apiToken
+            )
+
+            // 3. Start all Actors
+            configComponent.start()
+            authComponent.start()
+            roomComponent.start()
+            metricComponent.start()
+            liveEventSource.start()
+            downloaderComponent.start()
+            writerComponent.start()
+            postProcessorComponent.start()
+            sessionComponent.start()
+            schedulerComponent.start()
+
+            // 4. Bootstrap: load users, processors, rooms from config files
+            val bootstrap = Bootstrap(ApiClient, roomComponent, authComponent, postProcessorComponent, schedulerComponent)
+            bootstrap.initialize(args.toList())
+
+            // 5. Start HTTP server
+            val engine = httpServer.start()
+
+            // 6. Wait for shutdown
+            val shutdownSignal = CompletableDeferred<Unit>()
+            eventBus.subscribe(appScope, String::class) { msg ->
+                if (msg == "ServerShutdown") {
+                    engine.stop(1000, 5000)
+                    shutdownSignal.complete(Unit)
+                }
             }
-        })
 
+            // 6b. JVM shutdown hook
+            Runtime.getRuntime().addShutdownHook(Thread {
+                runBlocking(Dispatchers.Default) {
+                    mainLogger.info("Received termination signal, draining sessions before exit...")
+                    try {
+                        requestBus.request<OkResponse>(ShutdownCmd)
 
-        // 2. Components
-        val metricComponent = MetricComponent(eventBus, appScope)
-        val configComponent = ConfigComponent(config, eventBus, appScope)
-        val authComponent = AuthComponent(cli.getOptionValue("users", "users.txt"), eventBus, appScope)
-        val roomComponent =
-            RoomComponent(ApiClient, config.listConfPath, requestBus, eventBus, appScope)
-        // WS auth JWT is fetched dynamically at startup from config/initial (guest session),
-        // refreshed on auth failure or after its (unknown) validity window.
-        val liveEventSource = LiveEventSource({ ApiClient.fetchGuestWsToken() }, eventBus, appScope)
-
-        val downloaderComponent = DownloaderComponent(
-            dataChannel, eventBus = eventBus, parentScope = appScope, initialConcurrency = 64
-        )
-        val writerComponent = WriterComponent(
-            dataChannel, config.tmpDir,
-            eventBus = eventBus, parentScope = appScope
-        )
-        val postProcessorComponent = PostProcessorComponent(eventBus = eventBus, parentScope = appScope)
-        val sessionComponent = SessionComponent(
-            dataChannel,
-            downloaderComponent,
-            M3u8Parser,
-            requestBus,
-            ApiClient,
-            config.streamAuthKey,
-            eventBus,
-            appScope
-        )
-        val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope, config.streamAuthKey)
-
-        val httpServer = HttpServerComponent(
-            config.port,
-            eventBus,
-            requestBus,
-            metricComponent,
-            postProcessorComponent,
-            appScope,
-            mseStore,
-            config.apiToken
-        )
-
-
-        // 3. Start all Actors
-        configComponent.start()
-        authComponent.start()
-        roomComponent.start()
-        metricComponent.start()
-        liveEventSource.start()
-        downloaderComponent.start()
-        writerComponent.start()
-        postProcessorComponent.start()
-        sessionComponent.start()
-        schedulerComponent.start()
-
-        // 4. Bootstrap: load users, processors, rooms from config files
-        val bootstrap =
-            Bootstrap(ApiClient, roomComponent, authComponent, postProcessorComponent, schedulerComponent)
-        bootstrap.initialize(args.toList())
-
-        // 5. Start HTTP server
-        val engine = httpServer.start()
-
-        // 6. Wait for shutdown
-        val shutdownSignal = CompletableDeferred<Unit>()
-        eventBus.subscribe(appScope, String::class) { msg ->
-            if (msg == "ServerShutdown") {
-                engine.stop(1000, 5000)
-                shutdownSignal.complete(Unit)
-            }
-        }
-
-        // 6b. JVM shutdown hook: without this, `docker stop`/SIGTERM kills the
-        // process immediately with no chance to run the drain sequence below -
-        // in-progress recordings get truncated mid-write and never reach
-        // post-processing. This mirrors what the /graceful-stop HTTP route does,
-        // so a container stop behaves the same as a graceful HTTP shutdown.
-        // Requires a matching `stop_grace_period` in docker-compose.yml (this
-        // can take minutes to finish; Docker's default 10s grace period will
-        // SIGKILL right through it otherwise).
-        Runtime.getRuntime().addShutdownHook(Thread {
-            runBlocking {
-                mainLogger.info("Received termination signal, draining sessions before exit...")
-                try {
-                    requestBus.request<OkResponse>(ShutdownCmd)
-
-                    val sessions = requestBus.request<List<RoomSession>>(GetSessions)
-                        .filter { it.state == SessionState.Recording || it.state == SessionState.Fetching }
-                    if (sessions.isNotEmpty()) {
-                        for (s in sessions) {
-                            mainLogger.info("Waiting for {} to stop recording...", s.roomName)
-                            requestBus.request<OkResponse>(DeactivateCmd(s.roomId))
-                        }
-                        withTimeout(120_000L) {
-                            val stopped = mutableSetOf<Long>()
-                            while (stopped.size < sessions.size) {
-                                delay(500)
-                                val current = requestBus.request<List<RoomSession>>(GetSessions)
-                                for (s in sessions) {
-                                    if (s.roomId !in stopped) {
-                                        val cur = current.find { it.roomId == s.roomId }
-                                        if (cur == null || (cur.state != SessionState.Recording && cur.state != SessionState.Fetching)) {
-                                            stopped.add(s.roomId)
-                                            mainLogger.info("Stopped {}. remaining: {}", s.roomName, sessions.size - stopped.size)
+                        val sessions = requestBus.request<List<RoomSession>>(GetSessions)
+                            .filter { it.state == SessionState.Recording || it.state == SessionState.Fetching }
+                        if (sessions.isNotEmpty()) {
+                            for (s in sessions) {
+                                mainLogger.info("Waiting for {} to stop recording...", s.roomName)
+                                requestBus.request<OkResponse>(DeactivateCmd(s.roomId))
+                            }
+                            withTimeout(120_000L) {
+                                val stopped = mutableSetOf<Long>()
+                                while (stopped.size < sessions.size) {
+                                    delay(500)
+                                    val current = requestBus.request<List<RoomSession>>(GetSessions)
+                                    for (s in sessions) {
+                                        if (s.roomId !in stopped) {
+                                            val cur = current.find { it.roomId == s.roomId }
+                                            if (cur == null || (cur.state != SessionState.Recording && cur.state != SessionState.Fetching)) {
+                                                stopped.add(s.roomId)
+                                                mainLogger.info("Stopped {}. remaining: {}", s.roomName, sessions.size - stopped.size)
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    withTimeout(180_000L) {
-                        val pending = postProcessorComponent.jobs.filter { !it.value.isCompleted }
-                        val stopped = mutableSetOf<String>()
-                        while (stopped.size < pending.size) {
-                            delay(500)
-                            val current = postProcessorComponent.jobs.filter { !it.value.isCompleted }
-                            for (key in pending.keys) {
-                                if (key !in stopped) {
-                                    val cur = current[key]
-                                    if (cur == null || cur.isCompleted) {
-                                        stopped.add(key)
-                                        mainLogger.info("Post-processed {}. remaining: {}", key, pending.size - stopped.size)
+                        withTimeout(180_000L) {
+                            val pending = postProcessorComponent.jobs.filter { !it.value.isCompleted }
+                            val stopped = mutableSetOf<String>()
+                            while (stopped.size < pending.size) {
+                                delay(500)
+                                val current = postProcessorComponent.jobs.filter { !it.value.isCompleted }
+                                for (key in pending.keys) {
+                                    if (key !in stopped) {
+                                        val cur = current[key]
+                                        if (cur == null || cur.isCompleted) {
+                                            stopped.add(key)
+                                            mainLogger.info("Post-processed {}. remaining: {}", key, pending.size - stopped.size)
+                                        }
                                     }
                                 }
                             }
                         }
+                    } catch (e: Exception) {
+                        mainLogger.error("Error during shutdown drain, exiting anyway: ${e.message}", e)
+                    } finally {
+                        eventBus.publish("ServerShutdown")
+                        shutdownSignal.await()
                     }
-                } catch (e: Exception) {
-                    mainLogger.error("Error during shutdown drain, exiting anyway: ${e.message}", e)
-                } finally {
-                    eventBus.publish("ServerShutdown")
-                    shutdownSignal.await()
                 }
-            }
-        })
+            })
 
-        // 7. Cleanup on exit
-        try {
-            shutdownSignal.await()
-        } finally {
-            schedulerComponent.stop()
-            sessionComponent.stop()
-            downloaderComponent.stop()
-            writerComponent.stop()
-            postProcessorComponent.stop()
-            liveEventSource.stop()
-            metricComponent.stop()
-            roomComponent.stop()
-            authComponent.stop()
-            configComponent.stop()
-            dataChannel.close()
-            appScope.cancel()
-            println("XhRec v3 shut down")
+            // 7. Cleanup on exit
+            try {
+                shutdownSignal.await()
+            } finally {
+                schedulerComponent.stop()
+                sessionComponent.stop()
+                downloaderComponent.stop()
+                writerComponent.stop()
+                postProcessorComponent.stop()
+                liveEventSource.stop()
+                metricComponent.stop()
+                roomComponent.stop()
+                authComponent.stop()
+                configComponent.stop()
+                dataChannel.close()
+                appScope.cancel()
+                println("XhRec v3 shut down")
+            }
         }
     }
 }
