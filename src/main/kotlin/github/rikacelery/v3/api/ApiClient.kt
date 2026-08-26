@@ -165,10 +165,10 @@ object ApiClient {
         return Json.parseToJsonElement(response.bodyAsText()).jsonObject
     }
 
-    suspend fun roomFetchCamInfo(roomName: String, cookie: String): JsonObject {
+    suspend fun roomFetchCamInfo(roomId: Long, cookie: String): JsonObject {
         val response = withHostFallback { host ->
             withRetry(3) {
-                ensure2xx(host, apiClient.get(apiUrl(host, "api/front/v2/models/username/" + roomName + "/cam")) {
+                ensure2xx(host, apiClient.get(apiUrl(host, "api/front/v2/models/" + roomId + "/cam")) {
                     header("Cookie", cookie)
                 })
             }
@@ -176,13 +176,13 @@ object ApiClient {
         return Json.parseToJsonElement(response.bodyAsText()).jsonObject
     }
 
-    suspend fun roomFetchModelToken(roomName: String, user: User): String? {
-        val info = roomFetchCamInfo(roomName, user.cookie)
+    suspend fun roomFetchModelToken(roomId: Long, user: User): String? {
+        val info = roomFetchCamInfo(roomId, user.cookie)
         return info.PathSingle("cam.modelToken").asString().ifBlank { null }
     }
 
-    suspend fun hasFreeSpyAccess(roomName: String, user: User): Boolean {
-        val info = roomFetchCamInfo(roomName, user.cookie)
+    suspend fun hasFreeSpyAccess(roomId: Long, user: User): Boolean {
+        val info = roomFetchCamInfo(roomId, user.cookie)
         val subscription = info.PathSingleOrNull("cam.userFanClub.subscription")
         if (subscription == null || subscription is JsonNull) return false
         if (subscription.String("status") != "active") return false
@@ -240,8 +240,8 @@ object ApiClient {
         return response.status.value in 200..299
     }
 
-    suspend fun roomQualities(roomName: String): List<String> {
-        val info = roomFetchBroadcastInfo(roomName)
+    suspend fun roomQualities(roomId: Long): List<String> {
+        val info = roomFetchBroadcastInfo(roomId)
         val presetElem = info.PathSingleOrNull("item.settings.presets") ?: run {
             return emptyList()
         }
@@ -259,7 +259,7 @@ object ApiClient {
      * Fetches broadcast info. Explicitly handles 404: "model renamed" and
      * "model deleted" are business exceptions (no retry / no host failover).
      */
-    suspend fun roomFetchBroadcastInfo(roomName: String): JsonObject {
+    suspend fun roomFetchBroadcastInfo(roomId: Long): JsonObject {
         // Rename/Deleted are domain answers and must not fail over to another host.
         val domainBusiness: (Throwable) -> Boolean = { it is RenameException || it is DeletedException }
         // 4xx should not be retried against the same host; withHostFallback still
@@ -267,7 +267,7 @@ object ApiClient {
         val noRetry: (Throwable) -> Boolean = { domainBusiness(it) || is4xx(it) }
         return withHostFallback(stopIf = domainBusiness) { host ->
             withRetry(3, stopIf = noRetry) {
-                val response = apiClient.get(apiUrl(host, "api/front/v1/broadcasts/" + roomName))
+                val response = apiClient.get(apiUrl(host, "api/front/v2/broadcasts/" + roomId))
                 val status = response.status.value
                 if (status in 200..299) {
                     Json.parseToJsonElement(response.bodyAsText()).jsonObject

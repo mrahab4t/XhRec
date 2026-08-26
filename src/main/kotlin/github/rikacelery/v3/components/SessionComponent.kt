@@ -458,7 +458,7 @@ class SessionComponent(
     /** Returns model token for groupShow, empty string for public, null if can't record */
     private suspend fun configureSession(roomId: Long, roomName: String): String? {
         try {
-            val info = apiClient.roomFetchBroadcastInfo(roomName)
+            val info = apiClient.roomFetchBroadcastInfo(roomId)
             val status = info.PathSingle("item.status").asString()
             when {
                 RoomStatus.isPublic(status) -> return ""
@@ -474,7 +474,7 @@ class SessionComponent(
                             logger.warn("[{}] Room not enable autopay", roomName)
                         return null
                     }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, "")
+                    val camInfo = apiClient.roomFetchCamInfo(roomId, "")
                     val price = camInfo.PathSingle("user.user.ticketRate").asInt()
                     val users = requestBus.request<List<User>>(GetValidPaymentAccount(price.toLong()))
                     val u = users.firstOrNull()
@@ -484,12 +484,12 @@ class SessionComponent(
                             logger.warn("[{}] No account to pay. price={}", roomName, price)
                         return null
                     }
-                    var token = apiClient.roomFetchModelToken(roomName, u)
+                    var token = apiClient.roomFetchModelToken(roomId, u)
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
                         delay(2.seconds)
-                        token = apiClient.roomFetchModelToken(roomName, u)
+                        token = apiClient.roomFetchModelToken(roomId, u)
                     }
                     if (token == null) {
                         logger.warn("[{}] Failed to get model token", roomName)
@@ -510,10 +510,10 @@ class SessionComponent(
                     // 1. Resolve user and camInfo atomically in a single pass
                     val (user, camInfo) = run {
                         val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
-                        val freeUser = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
+                        val freeUser = users.firstOrNull { apiClient.hasFreeSpyAccess(roomId, it) }
                         
                         if (freeUser != null) {
-                            val info = apiClient.roomFetchCamInfo(roomName, freeUser.cookie)
+                            val info = apiClient.roomFetchCamInfo(roomId, freeUser.cookie)
                             return@run Pair(freeUser, info)
                         }
 
@@ -566,7 +566,7 @@ class SessionComponent(
                         apiClient.roomRequestSpyShow(roomId, user)
                         for (attempt in 1..4) {
                             delay(if (attempt == 1) 500L else 1500L)
-                            val cam = apiClient.roomFetchCamInfo(roomName, user.cookie)
+                            val cam = apiClient.roomFetchCamInfo(roomId, user.cookie)
                             token = cam.PathSingle("cam.modelToken").asString().ifBlank { null }
                             if (token != null) break
                         }
