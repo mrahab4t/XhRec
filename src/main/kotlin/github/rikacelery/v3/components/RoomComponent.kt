@@ -222,7 +222,7 @@ class RoomComponent(
                 scope.launch {
                     val room = rooms[cmd.roomId] ?: return@launch
                     try {
-                        val info = apiClient.roomFetchBroadcastInfo(room.id)
+                        val info = apiClient.roomFetchBroadcastInfo(room.name)
                         val status = info.PathSingle("item.status").asString()
                         if (status != room.status) {
                             rooms[room.id] = room.copy(status = status)
@@ -255,7 +255,7 @@ class RoomComponent(
         refreshLock.withLock {
             rooms.values.forEach { room ->
                 try {
-                    val info = apiClient.roomFetchBroadcastInfo(room.id)
+                    val info = apiClient.roomFetchBroadcastInfo(room.name)
                     val status = info.PathSingle("item.status").asString()
                     val oldStatus = room.status
                     if (status != oldStatus) {

@@ -240,8 +240,8 @@ object ApiClient {
         return response.status.value in 200..299
     }
 
-    suspend fun roomQualities(roomId: Long): List<String> {
-        val info = roomFetchBroadcastInfo(roomId)
+    suspend fun roomQualities(roomName: String): List<String> {
+        val info = roomFetchBroadcastInfo(roomName)
         val presetElem = info.PathSingleOrNull("item.settings.presets") ?: run {
             return emptyList()
         }
@@ -259,7 +259,7 @@ object ApiClient {
      * Fetches broadcast info. Explicitly handles 404: "model renamed" and
      * "model deleted" are business exceptions (no retry / no host failover).
      */
-    suspend fun roomFetchBroadcastInfo(roomId: Long): JsonObject {
+    suspend fun roomFetchBroadcastInfo(roomName: String): JsonObject {
         // Rename/Deleted are domain answers and must not fail over to another host.
         val domainBusiness: (Throwable) -> Boolean = { it is RenameException || it is DeletedException }
         // 4xx should not be retried against the same host; withHostFallback still
@@ -267,7 +267,7 @@ object ApiClient {
         val noRetry: (Throwable) -> Boolean = { domainBusiness(it) || is4xx(it) }
         return withHostFallback(stopIf = domainBusiness) { host ->
             withRetry(3, stopIf = noRetry) {
-                val response = apiClient.get(apiUrl(host, "api/front/v2/broadcasts/" + roomId))
+                val response = apiClient.get(apiUrl(host, "api/front/v1/broadcasts/" + roomName))
                 val status = response.status.value
                 if (status in 200..299) {
                     Json.parseToJsonElement(response.bodyAsText()).jsonObject

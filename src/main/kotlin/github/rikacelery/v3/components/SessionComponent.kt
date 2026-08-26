@@ -458,7 +458,7 @@ class SessionComponent(
     /** Returns model token for groupShow, empty string for public, null if can't record */
     private suspend fun configureSession(roomId: Long, roomName: String): String? {
         try {
-            val info = apiClient.roomFetchBroadcastInfo(roomId)
+            val info = apiClient.roomFetchBroadcastInfo(roomName)
             val status = info.PathSingle("item.status").asString()
             when {
                 RoomStatus.isPublic(status) -> return ""
@@ -540,7 +540,7 @@ class SessionComponent(
                             return null
                         }
 
-                        val paidCamInfo = apiClient.roomFetchCamInfo(roomName, paidUser.cookie)
+                        val paidCamInfo = apiClient.roomFetchCamInfo(roomId, paidUser.cookie)
                         val price = paidCamInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
                             val reason = "price unavailable"
                             if (lastBlockReason.put(roomId, reason) != reason) {
