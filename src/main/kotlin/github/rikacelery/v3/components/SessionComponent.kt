@@ -488,7 +488,7 @@ class SessionComponent(
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
-                        delay(2.seconds)
+                        delay(1.seconds)
                         token = apiClient.roomFetchModelToken(roomId, u)
                     }
                     if (token == null) {

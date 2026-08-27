@@ -62,5 +62,5 @@ users.txt
 *.log
 .java-version
 xhrec.keystore
-ahabcookie.txt
-urls.txt
+
+*.jsonl
