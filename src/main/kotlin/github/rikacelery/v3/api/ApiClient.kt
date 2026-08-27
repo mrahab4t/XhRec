@@ -165,10 +165,10 @@ object ApiClient {
         return Json.parseToJsonElement(response.bodyAsText()).jsonObject
     }
 
-    suspend fun roomFetchCamInfo(roomName: String, cookie: String): JsonObject {
+    suspend fun roomFetchCamInfo(roomId: Long, cookie: String): JsonObject {
         val response = withHostFallback { host ->
             withRetry(3) {
-                ensure2xx(host, apiClient.get(apiUrl(host, "api/front/v2/models/username/" + roomName + "/cam")) {
+                ensure2xx(host, apiClient.get(apiUrl(host, "api/front/v2/models/" + roomId + "/cam")) {
                     header("Cookie", cookie)
                 })
             }
@@ -176,8 +176,8 @@ object ApiClient {
         return Json.parseToJsonElement(response.bodyAsText()).jsonObject
     }
 
-    suspend fun roomFetchModelToken(roomName: String, user: User): String? {
-        val info = roomFetchCamInfo(roomName, user.cookie)
+    suspend fun roomFetchModelToken(roomId: Long, user: User): String? {
+        val info = roomFetchCamInfo(roomId, user.cookie)
         return info.PathSingle("cam.modelToken").asString().ifBlank { null }
     }
 

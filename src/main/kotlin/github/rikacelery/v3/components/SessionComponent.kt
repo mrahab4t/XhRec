@@ -474,7 +474,7 @@ class SessionComponent(
                             logger.warn("[{}] Room not enable autopay", roomName)
                         return null
                     }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, "")
+                    val camInfo = apiClient.roomFetchCamInfo(roomId, "")
                     val price = camInfo.PathSingle("user.user.ticketRate").asInt()
                     val users = requestBus.request<List<User>>(GetValidPaymentAccount(price.toLong()))
                     val u = users.firstOrNull()
@@ -484,12 +484,12 @@ class SessionComponent(
                             logger.warn("[{}] No account to pay. price={}", roomName, price)
                         return null
                     }
-                    var token = apiClient.roomFetchModelToken(roomName, u)
+                    var token = apiClient.roomFetchModelToken(roomId, u)
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
                         delay(1.seconds)
-                        token = apiClient.roomFetchModelToken(roomName, u)
+                        token = apiClient.roomFetchModelToken(roomId, u)
                     }
                     if (token == null) {
                         logger.warn("[{}] Failed to get model token", roomName)
@@ -519,7 +519,7 @@ class SessionComponent(
                             logger.warn("[{}] No user account to use for private show", roomName)
                         return null
                     }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
+                    val camInfo = apiClient.roomFetchCamInfo(roomId, u.cookie)
                     // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
                     // (confirmed: anonymous camInfo has no user object for p2p rooms)
                     val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
@@ -541,7 +541,7 @@ class SessionComponent(
                         apiClient.roomRequestSpyShow(roomId, u)
                         for (attempt in 1..4) {
                             delay(if (attempt == 1) 500L else 1500L)
-                            val cam = apiClient.roomFetchCamInfo(roomName, u.cookie)
+                            val cam = apiClient.roomFetchCamInfo(roomId, u.cookie)
                             token = cam.PathSingle("cam.modelToken").asString().ifBlank { null }
                             if (token != null) break
                         }
