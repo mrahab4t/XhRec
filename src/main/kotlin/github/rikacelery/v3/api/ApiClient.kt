@@ -181,6 +181,19 @@ object ApiClient {
         return info.PathSingle("cam.modelToken").asString().ifBlank { null }
     }
 
+    suspend fun hasFreeSpyAccess(roomId: Long, user: User): Boolean {
+        val info = roomFetchCamInfo(roomId, user.cookie)
+        val subscription = info.PathSingleOrNull("cam.userFanClub.subscription")
+        if (subscription == null || subscription is JsonNull) return false
+        if (subscription.String("status") != "active") return false
+        val tier = subscription.String("tier")
+        val benefits = info.PathSingleOrNull("cam.userFanClub.benefits")?.jsonArray ?: return false
+        val freeSpyingBenefit = benefits.firstOrNull {
+            it.jsonObject["id"]?.asString() == "freeSpying"
+        } ?: return false
+        return freeSpyingBenefit.PathSingleOrNull("tiers.$tier.isActive")?.asBoolean() ?: false
+    }
+
     suspend fun roomRequestGroupShow(roomId: Long, user: User): Boolean {
         val initial = userFetchInitial(user)
         val response = withHostFallback { host ->
