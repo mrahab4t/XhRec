@@ -507,11 +507,10 @@ class SessionComponent(
                         rs.sizeLimitBytes = config.sizeLimitBytes
                     }
 
-                    // 1. Resolve user and camInfo atomically in a single pass
                     val (user, camInfo) = run {
                         val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
                         val freeUser = users.firstOrNull { apiClient.hasFreeSpyAccess(roomId, it) }
-                        
+
                         if (freeUser != null) {
                             val info = apiClient.roomFetchCamInfo(roomId, freeUser.cookie)
                             return@run Pair(freeUser, info)
@@ -560,7 +559,6 @@ class SessionComponent(
                         Pair(paidUser, paidCamInfo)
                     }
 
-                    // 2. Both user and camInfo are now immutable 'val' types and non-null
                     var token = camInfo.PathSingle("cam.modelToken").asString().ifBlank { null }
                     if (token == null) {
                         apiClient.roomRequestSpyShow(roomId, user)
@@ -571,58 +569,6 @@ class SessionComponent(
                             if (token != null) break
                         }
                     }
-/*
-                    val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
-                    // Only do payment check if use does not have free spy access.
-                    val u = users.firstOrNull { apiClient.hasFreeSpyAccess(roomName, it) }
-                    val camInfo = apiClient.roomFetchCamInfo(roomName, u.cookie)
-                    if (u == null) {
-                        val reason = "no free spy access"
-                        if (lastBlockReason.put(roomId, reason) != reason)
-                            logger.warn("[{}] No account has free spy access for this room", roomName)
-                    } else {
-                        if (!config.autoPaySpy) {
-                            val reason = "autopay disabled"
-                            if (lastBlockReason.put(roomId, reason) != reason)
-                                logger.warn("[{}] Room not enable autopay (private)", roomName)
-                            return null
-                        }
-
-                        val u = requestBus.request<List<User>>(GetValidPaymentAccount(0)).firstOrNull()
-                        if (u == null) {
-                            val reason = "no account"
-                            if (lastBlockReason.put(roomId, reason) != reason)
-                                logger.warn("[{}] No user account to use for private show", roomName)
-                            return null
-                        }
-                        // TODO: verify `user.user.privateRate` on a real authenticated camInfo payload
-                        // (confirmed: anonymous camInfo has no user object for p2p rooms)
-                        val price = camInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
-                            val reason = "price unavailable"
-                            if (lastBlockReason.put(roomId, reason) != reason)
-                                logger.warn("[{}] privateRate not found in authenticated camInfo", roomName)
-                            return null
-                        }
-                        if (u.coins < price) {
-                            val reason = "insufficient balance"
-                            if (lastBlockReason.put(roomId, reason) != reason)
-                                logger.warn("[{}] No account to pay. price={}", roomName, price)
-                            return null
-                        }
-                    }
-                    var token = camInfo.PathSingle("cam.modelToken").asString().ifBlank { null }
-                    if (token == null) {
-                        // TODO: verify the spy endpoint verb/params/idempotency and the modelToken
-                        // fill timing on a real private show; the bounded retry below is a guess
-                        apiClient.roomRequestSpyShow(roomId, u)
-                        for (attempt in 1..4) {
-                            delay(if (attempt == 1) 500L else 1500L)
-                            val cam = apiClient.roomFetchCamInfo(roomName, u.cookie)
-                            token = cam.PathSingle("cam.modelToken").asString().ifBlank { null }
-                            if (token != null) break
-                        }
-                    }
-*/
                     if (token == null) {
                         val reason = "no token"
                         if (lastBlockReason.put(roomId, reason) != reason)
