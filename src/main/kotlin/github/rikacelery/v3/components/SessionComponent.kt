@@ -112,7 +112,7 @@ class SessionComponent(
         scope.launch {
             // quality rarely changes — poll infrequently to save network
             while (isActive) {
-                delay(5.minutes)
+                delay(60.seconds)
                 pollQualities()
             }
         }
@@ -475,6 +475,7 @@ class SessionComponent(
                         return null
                     }
                     val camInfo = apiClient.roomFetchCamInfo(roomId, "")
+                    val camInfo = apiClient.roomFetchCamInfo(roomId, "")
                     val price = camInfo.PathSingle("user.user.ticketRate").asInt()
                     val users = requestBus.request<List<User>>(GetValidPaymentAccount(price.toLong()))
                     val u = users.firstOrNull()
@@ -485,10 +486,13 @@ class SessionComponent(
                         return null
                     }
                     var token = apiClient.roomFetchModelToken(roomId, u)
+                    var token = apiClient.roomFetchModelToken(roomId, u)
                     if (token == null) {
                         apiClient.roomRequestGroupShow(roomId, u)
                         requestBus.request<OkResponse>(DeductCoins(u.userId, price.toLong()))
                         delay(1.seconds)
+                        token = apiClient.roomFetchModelToken(roomId, u)
+                        delay(2.seconds)
                         token = apiClient.roomFetchModelToken(roomId, u)
                     }
                     if (token == null) {
@@ -559,11 +563,66 @@ class SessionComponent(
                         Pair(paidUser, paidCamInfo)
                     }
 
+
+                    val (user, camInfo) = run {
+                        val users = requestBus.request<List<User>>(GetValidPaymentAccount(0))
+                        val freeUser = users.firstOrNull { apiClient.hasFreeSpyAccess(roomId, it) }
+
+                        if (freeUser != null) {
+                            val info = apiClient.roomFetchCamInfo(roomId, freeUser.cookie)
+                            return@run Pair(freeUser, info)
+                        }
+
+                        // --- No free user, evaluate payment fallback ---
+                        val freeReason = "no free spy access"
+                        if (lastBlockReason.put(roomId, freeReason) != freeReason) {
+                            logger.warn("[{}] No account has free spy access for this room", roomName)
+                        }
+
+                        if (!config.autoPaySpy) {
+                            val reason = "autopay disabled"
+                            if (lastBlockReason.put(roomId, reason) != reason) {
+                                logger.warn("[{}] Room not enable autopay (private)", roomName)
+                            }
+                            return null // Exits the parent function early
+                        }
+
+                        val paidUser = users.firstOrNull()
+                        if (paidUser == null) {
+                            val reason = "no account"
+                            if (lastBlockReason.put(roomId, reason) != reason) {
+                                logger.warn("[{}] No user account to use for private show", roomName)
+                            }
+                            return null
+                        }
+
+                        val paidCamInfo = apiClient.roomFetchCamInfo(roomId, paidUser.cookie)
+                        val price = paidCamInfo.PathSingleOrNull("user.user.privateRate")?.asInt() ?: run {
+                            val reason = "price unavailable"
+                            if (lastBlockReason.put(roomId, reason) != reason) {
+                                logger.warn("[{}] privateRate not found in authenticated camInfo", roomName)
+                            }
+                            return null
+                        }
+
+                        if (paidUser.coins < price) {
+                            val reason = "insufficient balance"
+                            if (lastBlockReason.put(roomId, reason) != reason) {
+                                logger.warn("[{}] No account to pay. price={}", roomName, price)
+                            }
+                            return null
+                        }
+
+                        Pair(paidUser, paidCamInfo)
+                    }
+
                     var token = camInfo.PathSingle("cam.modelToken").asString().ifBlank { null }
                     if (token == null) {
                         apiClient.roomRequestSpyShow(roomId, user)
+                        apiClient.roomRequestSpyShow(roomId, user)
                         for (attempt in 1..4) {
                             delay(if (attempt == 1) 500L else 1500L)
+                            val cam = apiClient.roomFetchCamInfo(roomId, user.cookie)
                             val cam = apiClient.roomFetchCamInfo(roomId, user.cookie)
                             token = cam.PathSingle("cam.modelToken").asString().ifBlank { null }
                             if (token != null) break
