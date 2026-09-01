@@ -33,7 +33,7 @@ class RoomComponent(
     eventBus: EventBus,
     parentScope: CoroutineScope,
     /** Slow catch-up cadence; live status changes arrive via WebSocket */
-    private val refreshInterval: Duration = 5.minutes
+    private val refreshInterval: Duration = 60.seconds
 ) : Actor<RoomMsg>("RoomComponent", eventBus, parentScope) {
 
     private val rooms = ConcurrentHashMap<Long, Room>()
