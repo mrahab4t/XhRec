@@ -135,34 +135,34 @@ fun main(vararg args: String) {
             val roomComponent = RoomComponent(ApiClient, config.listConfPath, requestBus, eventBus, appScope)
             val liveEventSource = LiveEventSource({ ApiClient.fetchGuestWsToken() }, eventBus, appScope)
 
-        val downloaderComponent = DownloaderComponent(
-            dataChannel, eventBus = eventBus, parentScope = appScope, initialConcurrency = 64
-        )
-        val writerComponent = WriterComponent(
-            dataChannel, config.tmpDir,
-            eventBus = eventBus, parentScope = appScope
-        )
-        val postProcessorComponent = PostProcessorComponent(eventBus = eventBus, parentScope = appScope)
-        val sessionComponent = SessionComponent(
-            dataChannel,
-            downloaderComponent,
-            M3u8Parser,
-            requestBus,
-            ApiClient,
-            config.streamAuthKey,
-            eventBus,
-            appScope
-        )
-        val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope, config.streamAuthKey)
+            val downloaderComponent = DownloaderComponent(
+                dataChannel, eventBus = eventBus, parentScope = appScope, initialConcurrency = 64
+            )
+            val writerComponent = WriterComponent(
+                dataChannel, config.tmpDir,
+                eventBus = eventBus, parentScope = appScope
+            )
+            val postProcessorComponent = PostProcessorComponent(eventBus = eventBus, parentScope = appScope)
+            val sessionComponent = SessionComponent(
+                dataChannel,
+                downloaderComponent,
+                M3u8Parser,
+                requestBus,
+                ApiClient,
+                config.streamAuthKey,
+                eventBus,
+                appScope
+            )
+            val schedulerComponent = SchedulerComponent(requestBus, sessionComponent, eventBus, appScope, config.streamAuthKey)
 
-        // Prediction persistence (loads on init, auto-saves periodically, saves on stop)
-        val predictionStore = PredictionStore(
-            "xhrec-predictions.json",
-            appScope,
-            saveIntervalMs = 60_000
-        )
-        // LightGBM-style GBDT: samples + models in working directory (Docker WORKDIR=/config)
-        PredictionEngine.start(appScope, trainIntervalMs = 30 * 60_000L)
+            // Prediction persistence (loads on init, auto-saves periodically, saves on stop)
+            val predictionStore = PredictionStore(
+                "xhrec-predictions.json",
+                appScope,
+                saveIntervalMs = 60_000
+            )
+            // LightGBM-style GBDT: samples + models in working directory (Docker WORKDIR=/config)
+            PredictionEngine.start(appScope, trainIntervalMs = 30 * 60_000L)
 
             val httpServer = HttpServerComponent(
                 config.port,
@@ -175,6 +175,7 @@ fun main(vararg args: String) {
                 config.apiToken
             )
 
+
             // 3. Start all Actors
             configComponent.start()
             authComponent.start()
@@ -186,6 +187,7 @@ fun main(vararg args: String) {
             postProcessorComponent.start()
             sessionComponent.start()
             schedulerComponent.start()
+            predictionStore.start()
 
             // 4. Bootstrap: load users, processors, rooms from config files
             val bootstrap = Bootstrap(ApiClient, roomComponent, authComponent, postProcessorComponent, schedulerComponent)
@@ -261,134 +263,26 @@ fun main(vararg args: String) {
                 }
             })
 
-        // Prediction persistence (loads on init, auto-saves periodically, saves on stop)
-        val predictionStore = PredictionStore(
-            "xhrec-predictions.json",
-            appScope,
-            saveIntervalMs = 60_000
-        )
-        // LightGBM-style GBDT: samples + models in working directory (Docker WORKDIR=/config)
-        PredictionEngine.start(appScope, trainIntervalMs = 30 * 60_000L)
-
-        val httpServer = HttpServerComponent(
-            config.port,
-            eventBus,
-            requestBus,
-            metricComponent,
-            postProcessorComponent,
-            appScope,
-            mseStore,
-            config.apiToken
-        )
-
-
-        // 3. Start all Actors
-        configComponent.start()
-        authComponent.start()
-        roomComponent.start()
-        metricComponent.start()
-        liveEventSource.start()
-        downloaderComponent.start()
-        writerComponent.start()
-        postProcessorComponent.start()
-        sessionComponent.start()
-        schedulerComponent.start()
-        predictionStore.start()
-
-        // 4. Bootstrap: load users, processors, rooms from config files
-        val bootstrap =
-            Bootstrap(ApiClient, roomComponent, authComponent, postProcessorComponent, schedulerComponent)
-        bootstrap.initialize(args.toList())
-
-        // 5. Start HTTP server
-        val engine = httpServer.start()
-
-            // 6. Wait for shutdown
-            val shutdownSignal = CompletableDeferred<Unit>()
-            eventBus.subscribe(appScope, String::class) { msg ->
-                if (msg == "ServerShutdown") {
-                    engine.stop(1000, 5000)
-                    shutdownSignal.complete(Unit)
-                }
+            // 7. Cleanup on exit
+            try {
+                shutdownSignal.await()
+            } finally {
+                schedulerComponent.stop()
+                sessionComponent.stop()
+                downloaderComponent.stop()
+                writerComponent.stop()
+                postProcessorComponent.stop()
+                liveEventSource.stop()
+                metricComponent.stop()
+                roomComponent.stop()
+                authComponent.stop()
+                configComponent.stop()
+                predictionStore.stop()
+                PredictionEngine.stop() // suspend: persist final state before scope is cancelled
+                dataChannel.close()
+                appScope.cancel()
+                println("XhRec v3 shut down")
             }
-
-            // 6b. JVM shutdown hook
-            Runtime.getRuntime().addShutdownHook(Thread {
-                runBlocking(Dispatchers.Default) {
-                    mainLogger.info("Received termination signal, draining sessions before exit...")
-                    try {
-                        requestBus.request<OkResponse>(ShutdownCmd)
-
-                        val sessions = requestBus.request<List<RoomSession>>(GetSessions)
-                            .filter { it.state == SessionState.Recording || it.state == SessionState.Fetching }
-                        if (sessions.isNotEmpty()) {
-                            for (s in sessions) {
-                                mainLogger.info("Waiting for {} to stop recording...", s.roomName)
-                                requestBus.request<OkResponse>(DeactivateCmd(s.roomId))
-                            }
-                            withTimeout(120_000L) {
-                                val stopped = mutableSetOf<Long>()
-                                while (stopped.size < sessions.size) {
-                                    delay(500)
-                                    val current = requestBus.request<List<RoomSession>>(GetSessions)
-                                    for (s in sessions) {
-                                        if (s.roomId !in stopped) {
-                                            val cur = current.find { it.roomId == s.roomId }
-                                            if (cur == null || (cur.state != SessionState.Recording && cur.state != SessionState.Fetching)) {
-                                                stopped.add(s.roomId)
-                                                mainLogger.info("Stopped {}. remaining: {}", s.roomName, sessions.size - stopped.size)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        withTimeout(180_000L) {
-                            val pending = postProcessorComponent.jobs.filter { !it.value.isCompleted }
-                            val stopped = mutableSetOf<String>()
-                            while (stopped.size < pending.size) {
-                                delay(500)
-                                val current = postProcessorComponent.jobs.filter { !it.value.isCompleted }
-                                for (key in pending.keys) {
-                                    if (key !in stopped) {
-                                        val cur = current[key]
-                                        if (cur == null || cur.isCompleted) {
-                                            stopped.add(key)
-                                            mainLogger.info("Post-processed {}. remaining: {}", key, pending.size - stopped.size)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        mainLogger.error("Error during shutdown drain, exiting anyway: ${e.message}", e)
-                    } finally {
-                        eventBus.publish("ServerShutdown")
-                        shutdownSignal.await()
-                    }
-                }
-            })
-
-        // 7. Cleanup on exit
-        try {
-            shutdownSignal.await()
-        } finally {
-            schedulerComponent.stop()
-            sessionComponent.stop()
-            downloaderComponent.stop()
-            writerComponent.stop()
-            postProcessorComponent.stop()
-            liveEventSource.stop()
-            metricComponent.stop()
-            roomComponent.stop()
-            authComponent.stop()
-            configComponent.stop()
-            predictionStore.stop()
-            PredictionEngine.stop() // suspend: persist final state before scope is cancelled
-            dataChannel.close()
-            appScope.cancel()
-            println("XhRec v3 shut down")
         }
     }
 }
