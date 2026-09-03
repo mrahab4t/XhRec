@@ -38,6 +38,11 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: |
+            network=internal
+          endpoint: tcp://socket_proxy:2375
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
