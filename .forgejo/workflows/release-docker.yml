@@ -41,7 +41,7 @@ jobs:
         with:
           driver: docker-container
           driver-opts: |
-            network=internal
+            network=socket_proxy
           endpoint: tcp://socket_proxy:2375
 
       - name: Build and push Docker image
