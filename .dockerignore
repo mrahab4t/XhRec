@@ -1,0 +1,7 @@
+.gradle/
+.git/
+*.png
+.vscode/
+.forgejo/
+.github/
+extension/

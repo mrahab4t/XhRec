@@ -2,7 +2,7 @@
 services:
   xhrec:
     build:
-      context: .
+      context: ../
       dockerfile: Dockerfile
     container_name: xhrec
     restart: unless-stopped
@@ -10,8 +10,11 @@ services:
       - 8090:8090
     dns:
       - 9.9.9.9
+      - 149.112.112.112
+    dns_opt:
+      - no-aaaa
     environment:
-      - TZ=America/New_York  # Update to your local time zone
+      - TZ=America/Chicago  # Update to your local time zone
     volumes:
       # Mount configuration files/templates directory
       - ./config:/app/config
